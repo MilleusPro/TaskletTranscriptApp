@@ -189,12 +189,174 @@ const sampleData = {
   ]
 };
 
+const MAX_IMPORT_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+const STORAGE_KEY = 'taskletTranscriptApp.meetings';
+
+function createEmptyImportReview() {
+  return {
+    meetingTitle: '',
+    date: '',
+    customer: '',
+    partner: '',
+    participants: '',
+    subject: ''
+  };
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function readStoredMeetings() {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return [];
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(STORAGE_KEY);
+    if (!storedValue) {
+      return [];
+    }
+
+    const parsedValue = JSON.parse(storedValue);
+    return Array.isArray(parsedValue) ? parsedValue : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function writeStoredMeetings(meetings) {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return false;
+  }
+
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(meetings));
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function createMeetingId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+
+  return `meeting-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function getAllMeetings() {
+  return [...sampleData.meetings, ...state.savedMeetings];
+}
+
+function getMeetingDisplayCustomer(meeting) {
+  if (meeting.customer) {
+    return meeting.customer;
+  }
+
+  if (meeting.customerId) {
+    const customer = getCustomerById(meeting.customerId);
+    return customer ? customer.name : 'Unassigned';
+  }
+
+  return 'Unassigned';
+}
+
+function getMeetingDisplayPartner(meeting) {
+  if (meeting.partner) {
+    return meeting.partner;
+  }
+
+  if (meeting.partnerId) {
+    const partner = getPartnerById(meeting.partnerId);
+    return partner ? partner.name : 'Unassigned';
+  }
+
+  return 'Unassigned';
+}
+
+function getMeetingDisplayParticipants(meeting) {
+  if (Array.isArray(meeting.participants) && meeting.participants.length) {
+    return meeting.participants.join(', ');
+  }
+
+  if (Array.isArray(meeting.participantIds) && meeting.participantIds.length) {
+    return meeting.participantIds
+      .map((id) => getParticipantById(id))
+      .filter(Boolean)
+      .map((participant) => participant.name)
+      .join(', ');
+  }
+
+  return 'No participants listed';
+}
+
+function getMeetingDurationLabel(meeting) {
+  if (typeof meeting.durationMinutes === 'number' && meeting.durationMinutes > 0) {
+    return `${meeting.durationMinutes} min`;
+  }
+
+  return 'Imported';
+}
+
+function getImportReviewFieldValue(reviewField) {
+  const field = document.querySelector(`.js-import-review-field[data-review-field="${reviewField}"]`);
+  if (field) {
+    return field.value;
+  }
+
+  return state.importReview[reviewField] || '';
+}
+
+function canSaveMeeting() {
+  const title = getImportReviewFieldValue('meetingTitle').trim();
+  const date = getImportReviewFieldValue('date').trim();
+  const selectedFile = state.importSelectedFile;
+  const isValidDocx = Boolean(selectedFile && typeof selectedFile.name === 'string' && selectedFile.name.toLowerCase().endsWith('.docx'));
+  return Boolean(title && date && isValidDocx);
+}
+
+function updateImportSaveButtonState() {
+  const saveButton = document.querySelector('.js-save-import-meeting');
+  if (!saveButton) {
+    return;
+  }
+
+  const shouldDisable = state.importSaveInProgress || !canSaveMeeting();
+  saveButton.disabled = shouldDisable;
+  saveButton.textContent = state.importSaveInProgress ? 'Saving...' : 'Save Meeting';
+}
+
 const state = {
   activeSection: 'dashboard',
   selectedMeetingId: null,
   activeViewerTab: 'overview',
   sortOrder: 'newest',
-  searchQuery: ''
+  searchQuery: '',
+  savedMeetings: readStoredMeetings(),
+  importSelectedFile: null,
+  importError: '',
+  importSuccessMessage: '',
+  importReview: createEmptyImportReview(),
+  importSaveInProgress: false
 };
 
 const sectionTitles = {
@@ -281,13 +443,16 @@ function renderViews() {
 
   document.getElementById('page-title').textContent = getPageTitle();
   attachInteractions();
+  updateImportSaveButtonState();
 }
 
 function getVisibleMeetings() {
   const query = state.searchQuery;
-  const meetings = [...sampleData.meetings].sort((a, b) => {
+  const meetings = getAllMeetings().sort((a, b) => {
     const order = state.sortOrder === 'oldest' ? 1 : -1;
-    return order * (new Date(a.date) - new Date(b.date));
+    const dateA = new Date(a.date || a.createdAt || '1970-01-01').getTime();
+    const dateB = new Date(b.date || b.createdAt || '1970-01-01').getTime();
+    return order * (dateA - dateB);
   });
 
   if (!query) {
@@ -295,21 +460,18 @@ function getVisibleMeetings() {
   }
 
   return meetings.filter((meeting) => {
-    const customer = getCustomerById(meeting.customerId);
-    const partner = getPartnerById(meeting.partnerId);
-    const participants = meeting.participantIds
-      .map((id) => getParticipantById(id))
-      .filter(Boolean)
-      .map((participant) => participant.name.toLowerCase())
-      .join(' ');
+    const customer = getMeetingDisplayCustomer(meeting);
+    const partner = getMeetingDisplayPartner(meeting);
+    const participants = getMeetingDisplayParticipants(meeting).toLowerCase();
+    const tags = Array.isArray(meeting.tags) ? meeting.tags.join(' ') : '';
 
     const haystack = [
       meeting.title,
       meeting.subject,
       meeting.meetingType,
-      meeting.tags.join(' '),
-      customer ? customer.name : '',
-      partner ? partner.name : '',
+      tags,
+      customer,
+      partner,
       participants
     ]
       .join(' ')
@@ -320,7 +482,7 @@ function getVisibleMeetings() {
 }
 
 function renderDashboard(meetings) {
-  const totalMeetings = sampleData.meetings.length;
+  const totalMeetings = getAllMeetings().length;
   const totalCustomers = sampleData.customers.length;
   const totalPartners = sampleData.partners.length;
   const openActions = sampleData.actions.filter((action) => action.status !== 'Completed' && action.status !== 'Cancelled').length;
@@ -404,27 +566,23 @@ function renderMeetingsPage() {
 }
 
 function renderMeetingListItem(meeting) {
-  const customer = getCustomerById(meeting.customerId);
-  const partner = getPartnerById(meeting.partnerId);
-  const participantNames = meeting.participantIds
-    .map((id) => getParticipantById(id))
-    .filter(Boolean)
-    .map((participant) => participant.name)
-    .join(', ');
+  const customer = getMeetingDisplayCustomer(meeting);
+  const partner = getMeetingDisplayPartner(meeting);
+  const participantNames = getMeetingDisplayParticipants(meeting);
   const openActions = sampleData.actions.filter((action) => action.sourceMeetingId === meeting.id && action.status !== 'Completed' && action.status !== 'Cancelled').length;
 
   return `
     <button class="meeting-card meeting-card--selectable js-open-meeting" type="button" data-meeting-id="${meeting.id}">
       <div class="meeting-card-header">
         <div>
-          <p class="meeting-meta">${formatDate(meeting.date)} · ${meeting.durationMinutes} min</p>
+          <p class="meeting-meta">${formatDate(meeting.date)} · ${getMeetingDurationLabel(meeting)}</p>
           <h4>${meeting.title}</h4>
         </div>
-        <span class="meeting-status ${meeting.meetingType === 'Demo' ? '' : 'completed'}">${meeting.meetingType}</span>
+        <span class="meeting-status ${meeting.meetingType === 'Demo' ? '' : 'completed'}">${meeting.meetingType || 'Imported'}</span>
       </div>
       <div class="meeting-table-details">
-        <div><strong>Customer</strong><span>${customer ? customer.name : 'Unassigned'}</span></div>
-        <div><strong>Partner</strong><span>${partner ? partner.name : 'Unassigned'}</span></div>
+        <div><strong>Customer</strong><span>${customer}</span></div>
+        <div><strong>Partner</strong><span>${partner}</span></div>
         <div><strong>Participants</strong><span>${participantNames}</span></div>
         <div><strong>Open actions</strong><span>${openActions}</span></div>
       </div>
@@ -433,14 +591,13 @@ function renderMeetingListItem(meeting) {
 }
 
 function renderMeetingDetailViewer(meeting) {
-  const attendeeNames = meeting.participantIds
-    .map((id) => getParticipantById(id))
-    .filter(Boolean)
-    .map((participant) => participant.name)
-    .join(', ');
-  const customer = getCustomerById(meeting.customerId);
-  const partner = getPartnerById(meeting.partnerId);
+  const attendeeNames = getMeetingDisplayParticipants(meeting);
+  const customer = getMeetingDisplayCustomer(meeting);
+  const partner = getMeetingDisplayPartner(meeting);
   const openActions = sampleData.actions.filter((action) => action.sourceMeetingId === meeting.id && action.status !== 'Completed' && action.status !== 'Cancelled').length;
+  const durationLabel = typeof meeting.durationMinutes === 'number' && meeting.durationMinutes > 0 ? `${meeting.durationMinutes} minutes` : 'Not captured yet';
+  const dateLabel = meeting.date ? `${formatDate(meeting.date)}${meeting.startTime ? ` · ${meeting.startTime}` : ''}` : 'Date not available';
+  const subjectText = meeting.subject || 'No subject captured yet.';
 
   return `
     <section class="viewer-shell">
@@ -448,7 +605,7 @@ function renderMeetingDetailViewer(meeting) {
         <div>
           <p class="eyebrow">Meeting viewer</p>
           <h3>${meeting.title}</h3>
-          <p>${meeting.subject}</p>
+          <p>${subjectText}</p>
         </div>
         <button class="secondary-button js-back-to-meetings" type="button">← Return to meetings</button>
       </div>
@@ -456,15 +613,15 @@ function renderMeetingDetailViewer(meeting) {
       <div class="viewer-meta-grid">
         <div>
           <strong>Date</strong>
-          <span>${formatDate(meeting.date)} · ${meeting.startTime}</span>
+          <span>${dateLabel}</span>
         </div>
         <div>
           <strong>Customer</strong>
-          <span>${customer ? customer.name : 'Unassigned'}</span>
+          <span>${customer}</span>
         </div>
         <div>
           <strong>Partner</strong>
-          <span>${partner ? partner.name : 'Unassigned'}</span>
+          <span>${partner}</span>
         </div>
         <div>
           <strong>Participants</strong>
@@ -472,7 +629,7 @@ function renderMeetingDetailViewer(meeting) {
         </div>
         <div>
           <strong>Duration</strong>
-          <span>${meeting.durationMinutes} minutes</span>
+          <span>${durationLabel}</span>
         </div>
         <div>
           <strong>Open actions</strong>
@@ -496,27 +653,30 @@ function renderMeetingDetailViewer(meeting) {
 }
 
 function renderViewerContent(meeting) {
-  const customer = getCustomerById(meeting.customerId);
-  const partner = getPartnerById(meeting.partnerId);
+  const customer = getMeetingDisplayCustomer(meeting);
+  const partner = getMeetingDisplayPartner(meeting);
   const actions = sampleData.actions.filter((action) => action.sourceMeetingId === meeting.id);
+  const summaryItems = Array.isArray(meeting.summary) && meeting.summary.length ? meeting.summary : [];
+  const decisionsItems = Array.isArray(meeting.decisions) && meeting.decisions.length ? meeting.decisions : [];
+  const questionItems = Array.isArray(meeting.openQuestions) && meeting.openQuestions.length ? meeting.openQuestions : [];
+  const commercialItems = Array.isArray(meeting.commercialNotes) && meeting.commercialNotes.length ? meeting.commercialNotes : [];
+  const tags = Array.isArray(meeting.tags) && meeting.tags.length ? meeting.tags.join(', ') : 'No tags captured yet.';
+  const transcriptText = meeting.transcript || 'Document text extraction has not been implemented yet.';
+  const fileName = meeting.originalFileName ? meeting.originalFileName : 'No file name captured yet.';
 
   switch (state.activeViewerTab) {
     case 'summary':
       return `
         <div class="viewer-block">
           <h4>Summary</h4>
-          <ul class="viewer-list">
-            ${meeting.summary.map((item) => `<li>${item}</li>`).join('')}
-          </ul>
+          ${summaryItems.length ? `<ul class="viewer-list">${summaryItems.map((item) => `<li>${item}</li>`).join('')}</ul>` : '<p>No summary has been extracted yet.</p>'}
         </div>
       `;
     case 'decisions':
       return `
         <div class="viewer-block">
           <h4>Decisions</h4>
-          <ul class="viewer-list">
-            ${meeting.decisions.map((item) => `<li>${item}</li>`).join('')}
-          </ul>
+          ${decisionsItems.length ? `<ul class="viewer-list">${decisionsItems.map((item) => `<li>${item}</li>`).join('')}</ul>` : '<p>No decisions have been extracted yet.</p>'}
         </div>
       `;
     case 'actions':
@@ -524,7 +684,7 @@ function renderViewerContent(meeting) {
         <div class="viewer-block">
           <h4>Actions</h4>
           <div class="action-list">
-            ${actions.length ? actions.map((action) => renderActionCard(action)).join('') : '<div class="empty-state">No actions recorded.</div>'}
+            ${actions.length ? actions.map((action) => renderActionCard(action)).join('') : '<div class="empty-state">No actions have been extracted yet.</div>'}
           </div>
         </div>
       `;
@@ -532,35 +692,34 @@ function renderViewerContent(meeting) {
       return `
         <div class="viewer-block">
           <h4>Open Questions</h4>
-          <ul class="viewer-list">
-            ${meeting.openQuestions.map((item) => `<li>${item}</li>`).join('')}
-          </ul>
+          ${questionItems.length ? `<ul class="viewer-list">${questionItems.map((item) => `<li>${item}</li>`).join('')}</ul>` : '<p>No open questions have been extracted yet.</p>'}
         </div>
       `;
     case 'commercial':
       return `
         <div class="viewer-block">
           <h4>Commercial Notes</h4>
-          <ul class="viewer-list">
-            ${meeting.commercialNotes.map((item) => `<li>${item}</li>`).join('')}
-          </ul>
+          ${commercialItems.length ? `<ul class="viewer-list">${commercialItems.map((item) => `<li>${item}</li>`).join('')}</ul>` : '<p>No commercial notes have been extracted yet.</p>'}
         </div>
       `;
     case 'transcript':
       return `
         <div class="viewer-block">
           <h4>Full Transcript</h4>
-          <p>${meeting.transcript}</p>
+          <p>${transcriptText}</p>
         </div>
       `;
     default:
       return `
         <div class="viewer-block">
           <h4>Overview</h4>
-          <p>${meeting.subject}</p>
-          <p><strong>Customer:</strong> ${customer ? customer.name : 'Unassigned'}</p>
-          <p><strong>Partner:</strong> ${partner ? partner.name : 'Unassigned'}</p>
-          <p><strong>Tags:</strong> ${meeting.tags.join(', ')}</p>
+          <p>${meeting.subject || 'No subject captured yet.'}</p>
+          <p><strong>Customer:</strong> ${customer}</p>
+          <p><strong>Partner:</strong> ${partner}</p>
+          <p><strong>Participants:</strong> ${getMeetingDisplayParticipants(meeting)}</p>
+          <p><strong>Date:</strong> ${meeting.date ? formatDate(meeting.date) : 'Date not available'}</p>
+          <p><strong>Original file:</strong> ${fileName}</p>
+          <p><strong>Tags:</strong> ${tags}</p>
         </div>
       `;
   }
@@ -655,12 +814,87 @@ function renderActions() {
 }
 
 function renderImport() {
+  const selectedFile = state.importSelectedFile;
+  const reviewVisible = Boolean(selectedFile);
+  const errorMessage = state.importError
+    ? `<p class="import-error" role="alert">${escapeHtml(state.importError)}</p>`
+    : '';
+  const successMessage = state.importSuccessMessage
+    ? `<p class="import-success" role="status">${escapeHtml(state.importSuccessMessage)}</p>`
+    : '';
+  const fileSummary = selectedFile
+    ? `
+      <div class="import-file-summary" role="status">
+        <p class="import-file-name">${escapeHtml(selectedFile.name)}</p>
+        <p class="import-file-size">${escapeHtml(formatFileSize(selectedFile.size))}</p>
+      </div>
+    `
+    : '<p class="import-hint">Choose a cleaned DOCX transcript to begin the review workflow.</p>';
+
+  const reviewPanel = reviewVisible ? `
+    <div class="import-review-panel">
+      <div class="section-heading">
+        <h4>Review meeting details</h4>
+      </div>
+      <div class="import-review-grid">
+        <label class="import-field-group">
+          <span>Meeting title</span>
+          <input class="import-field js-import-review-field" type="text" value="${escapeHtml(state.importReview.meetingTitle)}" data-review-field="meetingTitle" placeholder="Meeting title">
+        </label>
+        <label class="import-field-group">
+          <span>Date</span>
+          <input class="import-field js-import-review-field" type="date" value="${escapeHtml(state.importReview.date)}" data-review-field="date">
+        </label>
+        <label class="import-field-group">
+          <span>Customer</span>
+          <input class="import-field js-import-review-field" type="text" value="${escapeHtml(state.importReview.customer)}" data-review-field="customer" placeholder="Customer">
+        </label>
+        <label class="import-field-group">
+          <span>Partner</span>
+          <input class="import-field js-import-review-field" type="text" value="${escapeHtml(state.importReview.partner)}" data-review-field="partner" placeholder="Partner">
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Participants</span>
+          <input class="import-field js-import-review-field" type="text" value="${escapeHtml(state.importReview.participants)}" data-review-field="participants" placeholder="Participants">
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Subject</span>
+          <textarea class="import-field import-field--textarea js-import-review-field" data-review-field="subject" placeholder="Subject">${escapeHtml(state.importReview.subject)}</textarea>
+        </label>
+      </div>
+      <div class="import-actions">
+        <button class="primary-button js-save-import-meeting" type="button">Save Meeting</button>
+        <p class="import-note">A valid title, date, and DOCX file are required before saving. Real document extraction will be added later.</p>
+      </div>
+    </div>
+  ` : '';
+
   return `
     <section class="import-card">
-      <p class="eyebrow">Prototype</p>
-      <h3>Import transcript workflow</h3>
-      <p>This first shell keeps the import step visible without adding any backend or document parser yet.</p>
-      <p class="entity-meta">The Alteco sample meeting is already available under Recent Meetings and Meetings.</p>
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Import transcript</p>
+          <h3>Upload a cleaned meeting transcript</h3>
+        </div>
+      </div>
+      <p class="import-description">Select a DOCX file to start the review step. Document parsing and automatic extraction will be added later.</p>
+
+      <div id="import-dropzone" class="import-dropzone">
+        <input id="import-file-input" class="sr-only" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
+        <p class="import-dropzone-title">Drag and drop your DOCX transcript here</p>
+        <p class="import-dropzone-description">Only .docx files are supported for this prototype.</p>
+        <button class="secondary-button import-file-trigger" type="button">Choose DOCX file</button>
+      </div>
+
+      <div class="import-notes">
+        <p class="entity-meta">Supported format: .docx only</p>
+        <p class="entity-meta">Maximum file size: 10 MB</p>
+      </div>
+
+      ${errorMessage}
+      ${successMessage}
+      ${fileSummary}
+      ${reviewPanel}
     </section>
   `;
 }
@@ -712,6 +946,105 @@ function renderActionCard(action) {
   `;
 }
 
+function handleImportFileSelection(file) {
+  if (!file) {
+    return;
+  }
+
+  state.importSuccessMessage = '';
+
+  if (!file.name.toLowerCase().endsWith('.docx')) {
+    state.importSelectedFile = null;
+    state.importError = 'Unsupported file type. Please choose a .docx file.';
+    state.importReview = createEmptyImportReview();
+    renderViews();
+    return;
+  }
+
+  if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
+    state.importSelectedFile = null;
+    state.importError = 'The selected file is too large. Please choose a file smaller than 10 MB.';
+    state.importReview = createEmptyImportReview();
+    renderViews();
+    return;
+  }
+
+  state.importSelectedFile = {
+    name: file.name,
+    size: file.size
+  };
+  state.importError = '';
+  state.importReview = state.importReview || createEmptyImportReview();
+  renderViews();
+  updateImportSaveButtonState();
+}
+
+function handleSaveMeeting() {
+  if (state.importSaveInProgress || !canSaveMeeting()) {
+    return;
+  }
+
+  state.importError = '';
+  state.importSuccessMessage = '';
+  state.importSaveInProgress = true;
+  renderViews();
+  updateImportSaveButtonState();
+
+  const title = state.importReview.meetingTitle.trim();
+  const date = state.importReview.date.trim();
+  const subject = state.importReview.subject.trim();
+  const customer = state.importReview.customer.trim();
+  const partner = state.importReview.partner.trim();
+  const participants = state.importReview.participants
+    .split(',')
+    .map((participant) => participant.trim())
+    .filter(Boolean);
+
+  const meeting = {
+    id: createMeetingId(),
+    title,
+    date,
+    startTime: '',
+    durationMinutes: 0,
+    meetingType: 'Imported',
+    customerId: null,
+    partnerId: null,
+    participantIds: [],
+    subject,
+    tags: [],
+    summary: [],
+    decisions: [],
+    openQuestions: [],
+    commercialNotes: [],
+    actionItemIds: [],
+    transcript: '',
+    originalFileName: state.importSelectedFile ? state.importSelectedFile.name : '',
+    customer,
+    partner,
+    participants,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const updatedMeetings = [meeting, ...state.savedMeetings];
+  const storedSuccessfully = writeStoredMeetings(updatedMeetings);
+
+  if (!storedSuccessfully) {
+    state.importError = 'Unable to save the meeting. Please try again.';
+    state.importSaveInProgress = false;
+    renderViews();
+    return;
+  }
+
+  state.savedMeetings = updatedMeetings;
+  state.importSelectedFile = null;
+  state.importReview = createEmptyImportReview();
+  state.importSuccessMessage = `Meeting saved successfully as ${meeting.title}.`;
+  state.importSaveInProgress = false;
+  renderViews();
+  updateImportSaveButtonState();
+}
+
 function attachInteractions() {
   document.querySelectorAll('.js-open-meeting').forEach((button) => {
     button.addEventListener('click', () => {
@@ -736,6 +1069,62 @@ function attachInteractions() {
     });
   });
 
+  document.querySelectorAll('.js-import-review-field').forEach((field) => {
+    field.addEventListener('input', () => {
+      const reviewField = field.dataset.reviewField;
+      if (reviewField) {
+        state.importReview[reviewField] = field.value;
+      }
+
+      if (reviewField === 'meetingTitle' || reviewField === 'date') {
+        updateImportSaveButtonState();
+      }
+    });
+  });
+
+  document.querySelectorAll('.js-save-import-meeting').forEach((button) => {
+    button.addEventListener('click', () => {
+      handleSaveMeeting();
+    });
+  });
+
+  const importFileTrigger = document.querySelector('.import-file-trigger');
+  const importFileInput = document.getElementById('import-file-input');
+  const importDropzone = document.getElementById('import-dropzone');
+
+  if (importFileTrigger && importFileInput) {
+    importFileTrigger.addEventListener('click', () => {
+      importFileInput.click();
+    });
+  }
+
+  if (importFileInput) {
+    importFileInput.addEventListener('change', (event) => {
+      handleImportFileSelection(event.target.files?.[0]);
+      event.target.value = '';
+    });
+  }
+
+  if (importDropzone && importFileInput) {
+    const addDragState = (event) => {
+      event.preventDefault();
+      importDropzone.classList.add('drag-over');
+    };
+    const removeDragState = (event) => {
+      event.preventDefault();
+      importDropzone.classList.remove('drag-over');
+    };
+
+    importDropzone.addEventListener('dragenter', addDragState);
+    importDropzone.addEventListener('dragover', addDragState);
+    importDropzone.addEventListener('dragleave', removeDragState);
+    importDropzone.addEventListener('dragend', removeDragState);
+    importDropzone.addEventListener('drop', (event) => {
+      removeDragState(event);
+      handleImportFileSelection(event.dataTransfer?.files?.[0]);
+    });
+  }
+
   const sortSelect = document.getElementById('meeting-sort-order');
   if (sortSelect) {
     sortSelect.value = state.sortOrder;
@@ -744,10 +1133,20 @@ function attachInteractions() {
       renderViews();
     });
   }
+
+  const topImportButton = document.querySelector('.topbar .primary-button');
+  if (topImportButton) {
+    topImportButton.addEventListener('click', () => {
+      state.activeSection = 'import';
+      state.selectedMeetingId = null;
+      state.activeViewerTab = 'overview';
+      renderViews();
+    });
+  }
 }
 
 function getMeetingById(meetingId) {
-  return sampleData.meetings.find((meeting) => meeting.id === meetingId);
+  return getAllMeetings().find((meeting) => meeting.id === meetingId);
 }
 
 function getCustomerById(customerId) {
