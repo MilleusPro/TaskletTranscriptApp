@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+  >
+
+  <title>Tasklet Transcript App</title>
+
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <div class="app">
+
+    <!-- Left navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">T</div>
+
+        <div>
+          <h1>Transcript App</h1>
+          <p>Tasklet Factory</p>
+        </div>
+      </div>
+
+      <nav class="navigation">
+        <button class="nav-button active" type="button">
+          Dashboard
+        </button>
+
+        <button class="nav-button" type="button">
+          Partners
+        </button>
+
+        <button class="nav-button" type="button">
+          Customers
+        </button>
+
+        <button class="nav-button" type="button">
+          Participants
+        </button>
+
+        <button class="nav-button" type="button">
+          Recent Meetings
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <p>Use test data only while the repository is public.</p>
+      </div>
+    </aside>
+
+    <!-- Main area -->
+    <main class="main-content">
+
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Meeting knowledge base</p>
+          <h2>Welcome back</h2>
+        </div>
+
+        <button class="primary-button" type="button">
+          + Add transcript
+        </button>
+      </header>
+
+      <!-- Search -->
+      <section class="search-section">
+        <label for="meeting-search">Find a meeting</label>
+
+        <input
+          id="meeting-search"
+          type="search"
+          placeholder="Search by partner, customer, participant, or topic..."
+        >
+      </section>
+
+      <!-- Summary cards -->
+      <section class="statistics" aria-label="Meeting statistics">
+        <article class="stat-card">
+          <p class="stat-label">Partners</p>
+          <p class="stat-number">8</p>
+        </article>
+
+        <article class="stat-card">
+          <p class="stat-label">Customers</p>
+          <p class="stat-number">14</p>
+        </article>
+
+        <article class="stat-card">
+          <p class="stat-label">Meetings</p>
+          <p class="stat-number">27</p>
+        </article>
+
+        <article class="stat-card">
+          <p class="stat-label">Open actions</p>
+          <p class="stat-number">11</p>
+        </article>
+      </section>
+
+      <!-- Recent meetings -->
+      <section class="meetings-section">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Latest activity</p>
+            <h3>Recent meetings</h3>
+          </div>
+
+          <button class="text-button" type="button">
+            View all
+          </button>
+        </div>
+
+        <div class="meeting-list">
+
+          <!-- Meeting 1 -->
+          <article class="meeting-card">
+            <div class="meeting-card-header">
+              <div>
+                <div class="meeting-tags">
+                  <span class="tag partner-tag">Partner: Northstar IT</span>
+                  <span class="tag customer-tag">Customer: Bluebird Retail</span>
+                </div>
+
+                <h4>Warehouse implementation planning</h4>
+
+                <p class="meeting-meta">
+                  18 July 2026 · 45 minutes · 5 participants
+                </p>
+              </div>
+
+              <span class="meeting-status">Follow-up needed</span>
+            </div>
+
+            <p class="meeting-summary">
+              The team discussed the rollout plan, warehouse requirements,
+              user training, and the proposed implementation timeline.
+            </p>
+
+            <div class="meeting-details-grid">
+              <div>
+                <h5>Participants</h5>
+
+                <p>
+                  Anna Jensen, Mark Peters, Sarah Lewis,
+                  Daniel Moore, and You
+                </p>
+              </div>
+
+              <div>
+                <h5>Next action</h5>
+
+                <p>
+                  Send the revised implementation plan to the partner
+                  before 23 July.
+                </p>
+              </div>
+            </div>
+
+            <details>
+              <summary>View key points and actions</summary>
+
+              <div class="details-content">
+                <h5>Key points</h5>
+
+                <ul>
+                  <li>The customer wants a phased implementation.</li>
+                  <li>Warehouse testing should begin before user training.</li>
+                  <li>The partner will confirm the available consultants.</li>
+                </ul>
+
+                <h5>Action points</h5>
+
+                <ul class="action-list">
+                  <li>
+                    <strong>You:</strong>
+                    Send the revised implementation plan.
+                  </li>
+
+                  <li>
+                    <strong>Northstar IT:</strong>
+                    Confirm consultant availability.
+                  </li>
+
+                  <li>
+                    <strong>Bluebird Retail:</strong>
+                    Provide the final list of warehouse users.
+                  </li>
+                </ul>
+              </div>
+            </details>
+          </article>
+
+          <!-- Meeting 2 -->
+          <article class="meeting-card">
+            <div class="meeting-card-header">
+              <div>
+                <div class="meeting-tags">
+                  <span class="tag partner-tag">Partner: Summit Solutions</span>
+                  <span class="tag customer-tag">Customer: Greenfield Foods</span>
+                </div>
+
+                <h4>Project introduction and discovery</h4>
+
+                <p class="meeting-meta">
+                  15 July 2026 · 30 minutes · 4 participants
+                </p>
+              </div>
+
+              <span class="meeting-status completed">Completed</span>
+            </div>
+
+            <p class="meeting-summary">
+              An introductory meeting covering the customer’s current
+              warehouse processes, challenges, and project expectations.
+            </p>
+
+            <div class="meeting-details-grid">
+              <div>
+                <h5>Participants</h5>
+
+                <p>
+                  Maria Olsen, James Smith, Peter Wilson, and You
+                </p>
+              </div>
+
+              <div>
+                <h5>Next action</h5>
+
+                <p>
+                  Schedule a technical discovery session with the
+                  customer’s warehouse team.
+                </p>
+              </div>
+            </div>
+
+            <details>
+              <summary>View key points and actions</summary>
+
+              <div class="details-content">
+                <h5>Key points</h5>
+
+                <ul>
+                  <li>The customer currently uses several manual processes.</li>
+                  <li>Barcode scanning is a major priority.</li>
+                  <li>The partner requested a technical workshop.</li>
+                </ul>
+
+                <h5>Action points</h5>
+
+                <ul class="action-list">
+                  <li>
+                    <strong>You:</strong>
+                    Propose dates for the technical workshop.
+                  </li>
+
+                  <li>
+                    <strong>Greenfield Foods:</strong>
+                    Document the current warehouse workflow.
+                  </li>
+                </ul>
+              </div>
+            </details>
+          </article>
+
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

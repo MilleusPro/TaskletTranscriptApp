@@ -1,53 +1,72 @@
-# AGENTS.md
+# Tasklet Transcript App — Agent Guide
 
 ## Project purpose
 
-This repository contains Transcript Hub, a private transcript-management application for organizing meeting transcripts by partner, customer, and participant.
+This repository contains a transcript management application.
 
-## Working rules
+The application should allow a user to:
 
-- Read `docs/PRODUCT_SPEC.md` before changing product behavior.
-- For substantial changes, update `docs/IMPLEMENTATION_PLAN.md` before implementation.
-- Do not stop at a visual mockup when the task requires working behavior.
-- Prefer complete vertical slices over many unfinished components.
-- Keep TypeScript strict.
-- Validate all server inputs.
-- Keep database access out of presentation components.
-- Keep parsing logic isolated from UI logic.
-- Preserve original source data during parsing and normalization.
-- Use meeting date, not import date, for transcript chronology.
-- Store partner/customer roles on transcript relationships.
-- Never assume an organization has only one permanent role.
-- Preserve both source filename and extracted display title.
-- Add tests for parsing bugs and entity-resolution bugs.
+- Import cleaned meeting transcripts.
+- Store meeting information.
+- Browse meetings by customer, partner, participant, and date.
+- Show meetings newest first by default.
+- Open a meeting in a transcript viewer.
+- Track decisions, open questions, and follow-up actions.
+- Search across all imported meetings.
 
-## Privacy
+## Current technology
 
-- Never send transcript content to external APIs unless a future task explicitly requires and authorizes it.
-- Do not add external analytics.
-- Do not commit uploaded transcripts, local databases, generated document text, or customer data.
-- Keep uploads outside publicly served directories.
-- Sanitize imported HTML before rendering.
-- Avoid logging transcript contents.
+The first version uses:
 
-## UX
+- HTML
+- CSS
+- Vanilla JavaScript
+- Browser localStorage
 
-- Maintain the three-pane desktop layout:
-  entity cards, transcript list, transcript viewer.
-- Keep the viewer optimized for reading long documents.
-- Include keyboard-accessible controls and visible focus states.
-- Include loading, empty, error, and needs-review states.
-- Avoid adding features that distract from import, lookup, search, and reading.
+Do not introduce React, Next.js, Vue, Angular, a database, or a backend unless a task explicitly asks for it.
 
-## Verification
+## Important documentation
 
-Before reporting completion, run all available:
-- formatting checks
-- linting
-- type checks
-- unit tests
-- integration tests
-- end-to-end tests
-- production build
+Before implementing features, read:
 
-Report the exact commands run and any failures that remain.
+- `docs/PRODUCT_REQUIREMENTS.md`
+- `docs/DATA_MODEL.md`
+- `docs/TRANSCRIPT_FORMAT.md`
+- `.github/copilot-instructions.md`
+
+## Development rules
+
+- Keep HTML, CSS, and JavaScript in separate files.
+- Use semantic HTML.
+- Use clear and descriptive JavaScript function names.
+- Avoid global variables where practical.
+- Do not use inline CSS or inline JavaScript.
+- Keep the interface responsive.
+- Do not delete existing working features unless explicitly instructed.
+- Do not redesign unrelated parts of the application.
+- Complete one feature at a time.
+- Preserve all imported transcript text.
+- Never silently discard data that could not be classified.
+
+## Data rules
+
+- Meetings must be sorted newest first by default.
+- Customers and partners are different entity types.
+- A meeting may have a customer, a partner, both, or neither.
+- A participant may belong to a customer, partner, Tasklet, or another company.
+- The original transcript content remains the source of truth.
+- Automatically extracted data must be reviewable before final saving.
+- Commercial information is meeting information, not an official quotation.
+
+## Agent workflow
+
+For each task:
+
+1. Read the relevant documentation.
+2. Inspect the existing files.
+3. Explain the planned changes briefly.
+4. Implement only the requested scope.
+5. Check for JavaScript errors.
+6. Test the main workflow manually.
+7. Summarize which files were changed.
+8. Mention any remaining limitations.
