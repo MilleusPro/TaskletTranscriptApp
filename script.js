@@ -7,6 +7,12 @@ const sampleData = {
 };
 
 const MAX_IMPORT_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+const TRANSCRIPT_STORAGE_BUCKET = 'Transcript_files';
+const DOCX_MIME_TYPES = [
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/octet-stream',
+  'application/zip'
+];
 const STORAGE_KEY = 'taskletTranscriptApp.meetings';
 const ACTION_OVERRIDES_STORAGE_KEY = 'taskletTranscriptApp.actionOverrides';
 const SETTINGS_STORAGE_KEY = 'taskletTranscriptApp.settings';
@@ -55,7 +61,11 @@ const MEETING_ROW_COLUMNS = [
   'extracted_text',
   'extracted_html',
   'extra_sections',
+  'storage_bucket',
+  'storage_path',
   'original_file_name',
+  'original_file_size',
+  'original_file_mime_type',
   'created_at',
   'updated_at'
 ].join(', ');
@@ -274,6 +284,9 @@ function clearCloudMeetingState() {
   state.savedMeetings = [];
   state.cloudMeetingsError = '';
   state.cloudMeetingsLoaded = false;
+  state.meetingDocumentDownloadInProgressId = '';
+  state.meetingDocumentDownloadError = '';
+  state.meetingDeletionWarning = '';
   authState.meetingsLoading = false;
   authState.meetingsLoadError = '';
   state.migrationInProgress = false;
@@ -1531,6 +1544,15 @@ function normalizeMeetingRecord(meeting) {
   normalizedMeeting.extraSections = Array.isArray(meeting.extraSections)
     ? meeting.extraSections.map(normalizeExtraSection).filter(Boolean)
     : [];
+  normalizedMeeting.storageBucket = String(meeting.storageBucket || '').trim();
+  normalizedMeeting.storagePath = String(meeting.storagePath || '').trim();
+  normalizedMeeting.originalFileName = String(meeting.originalFileName || '').trim();
+  normalizedMeeting.originalFileMimeType = String(meeting.originalFileMimeType || '').trim();
+
+  const numericFileSize = Number(meeting.originalFileSize);
+  normalizedMeeting.originalFileSize = Number.isFinite(numericFileSize) && numericFileSize >= 0
+    ? Math.trunc(numericFileSize)
+    : null;
 
   return normalizedMeeting;
 }
@@ -1559,6 +1581,66 @@ function normalizeMeetingParticipants(value) {
   }
 
   return [];
+}
+
+function isDocxFileName(fileName) {
+  return typeof fileName === 'string' && fileName.trim().toLowerCase().endsWith('.docx');
+}
+
+function sanitizeDocxStorageFileName(fileName) {
+  const fallbackName = 'transcript.docx';
+  const rawName = String(fileName || '').trim();
+  const basename = rawName.split(/[\\/]/).pop() || fallbackName;
+  const baseWithoutExtension = basename.replace(/\.docx$/i, '');
+  const safeBase = baseWithoutExtension
+    .replace(/\.+/g, '.')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^[-.]+|[-.]+$/g, '')
+    .slice(0, 120);
+  const normalizedBase = safeBase || 'transcript';
+  return `${normalizedBase}.docx`;
+}
+
+function getValidatedImportDocxFile(file) {
+  const isFileInstance = typeof File !== 'undefined' && file instanceof File;
+  if (!isFileInstance) {
+    return {
+      valid: false,
+      error: 'Select a DOCX file before saving.'
+    };
+  }
+
+  if (!isDocxFileName(file.name)) {
+    return {
+      valid: false,
+      error: 'Unsupported file type. Please choose a .docx file.'
+    };
+  }
+
+  if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
+    return {
+      valid: false,
+      error: 'The selected file is too large. Please choose a file smaller than 10 MB.'
+    };
+  }
+
+  const mimeType = String(file.type || '').trim().toLowerCase();
+  if (mimeType && !DOCX_MIME_TYPES.includes(mimeType)) {
+    return {
+      valid: false,
+      error: 'Unsupported DOCX MIME type. Please choose a valid .docx file.'
+    };
+  }
+
+  return {
+    valid: true,
+    file
+  };
+}
+
+function buildTranscriptStoragePath(userId, meetingId, originalFileName) {
+  const safeFileName = sanitizeDocxStorageFileName(originalFileName);
+  return `${String(userId || '').trim()}/${String(meetingId || '').trim()}/${safeFileName}`;
 }
 
 function getActionOverrideDatabaseId(userId, actionId) {
@@ -1599,6 +1681,8 @@ function mapActionOverrideToDatabaseRow(override, authenticatedUserId, meetingId
 function mapMeetingToDatabaseRow(meeting, authenticatedUserId) {
   const normalizedMeeting = normalizeMeetingRecord(meeting || {});
   const now = new Date().toISOString();
+  const storagePath = String(normalizedMeeting.storagePath || '').trim();
+  const storageBucket = String(normalizedMeeting.storageBucket || '').trim() || (storagePath ? TRANSCRIPT_STORAGE_BUCKET : '');
 
   return {
     id: String(normalizedMeeting.id || createMeetingId()),
@@ -1625,7 +1709,13 @@ function mapMeetingToDatabaseRow(meeting, authenticatedUserId) {
         lines: normalizeStringArray(section.lines)
       }))
       : [],
+    storage_bucket: storageBucket || null,
+    storage_path: storagePath || null,
     original_file_name: String(normalizedMeeting.originalFileName || '').trim(),
+    original_file_size: Number.isFinite(Number(normalizedMeeting.originalFileSize))
+      ? Math.trunc(Number(normalizedMeeting.originalFileSize))
+      : null,
+    original_file_mime_type: String(normalizedMeeting.originalFileMimeType || '').trim() || null,
     created_at: normalizedMeeting.createdAt || now,
     updated_at: normalizedMeeting.updatedAt || now
   };
@@ -1635,6 +1725,9 @@ function mapDatabaseRowToMeeting(row) {
   if (!row || typeof row !== 'object') {
     return normalizeMeetingRecord({});
   }
+
+  const storagePath = String(row.storage_path || '').trim();
+  const storageBucket = String(row.storage_bucket || '').trim() || (storagePath ? TRANSCRIPT_STORAGE_BUCKET : '');
 
   return normalizeMeetingRecord({
     id: String(row.id || ''),
@@ -1664,7 +1757,11 @@ function mapDatabaseRowToMeeting(row) {
     extraSections: Array.isArray(row.extra_sections)
       ? row.extra_sections.map(normalizeExtraSection).filter(Boolean)
       : [],
+    storageBucket,
+    storagePath,
     originalFileName: String(row.original_file_name || '').trim(),
+    originalFileSize: Number.isFinite(Number(row.original_file_size)) ? Math.trunc(Number(row.original_file_size)) : null,
+    originalFileMimeType: String(row.original_file_mime_type || '').trim(),
     customer: String(row.customer || '').trim(),
     partner: String(row.partner || '').trim(),
     participants: normalizeMeetingParticipants(row.participants),
@@ -1896,7 +1993,8 @@ function canSaveMeeting() {
   const dateValue = getImportReviewFieldValue('date').trim();
   const selectedFile = state.importSelectedFile;
   const hasExtractedContent = Boolean(state.importExtractedText.trim() || state.importExtractedHtml.trim());
-  const isValidDocx = Boolean(selectedFile && typeof selectedFile.name === 'string' && selectedFile.name.toLowerCase().endsWith('.docx'));
+  const validation = getValidatedImportDocxFile(selectedFile);
+  const isValidDocx = validation.valid;
   const isValidDate = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) && normalizeExtractedDate(dateValue) === dateValue;
   return Boolean(title && isValidDate && isValidDocx && !state.importExtracting && !state.importExtractionError && hasExtractedContent);
 }
@@ -1949,6 +2047,7 @@ const state = {
   importSuccessMessage: '',
   importReview: createEmptyImportReview(),
   importSaveInProgress: false,
+  importSaveStatus: '',
   importExtracting: false,
   importExtractionError: '',
   importExtractedText: '',
@@ -1963,7 +2062,10 @@ const state = {
   dataManagementSuccess: '',
   dataManagementLastExportAt: '',
   dataManagementSelectedBackupFile: null,
-  dataManagementSelectedBackupName: ''
+  dataManagementSelectedBackupName: '',
+  meetingDocumentDownloadInProgressId: '',
+  meetingDocumentDownloadError: '',
+  meetingDeletionWarning: ''
 };
 
 function isSavedMeetingEditable(meetingId) {
@@ -2167,6 +2269,8 @@ async function deleteSavedMeeting() {
   }
 
   const meeting = state.savedMeetings[meetingIndex];
+  const storageBucket = String(meeting.storageBucket || '').trim();
+  const storagePath = String(meeting.storagePath || '').trim();
   const confirmed = window.confirm(`Delete "${meeting.title}"?\n\nThis removes the meeting from your Supabase account.`);
   if (!confirmed) {
     return;
@@ -2194,6 +2298,14 @@ async function deleteSavedMeeting() {
     return;
   }
 
+  state.meetingDeletionWarning = '';
+  if (storageBucket && storagePath) {
+    const cleanupResult = await deleteStoredTranscriptFile(storageBucket, storagePath);
+    if (!cleanupResult.success) {
+      state.meetingDeletionWarning = 'Meeting was deleted, but original document cleanup failed in Supabase Storage.';
+    }
+  }
+
   const updatedMeetings = state.savedMeetings.filter((meetingItem) => meetingItem.id !== meetingId);
 
   state.actionOverrides = nextOverrides;
@@ -2205,6 +2317,8 @@ async function deleteSavedMeeting() {
   state.searchHighlightedActionId = '';
   state.activeSection = 'meetings';
   state.meetingReturnContext = null;
+  state.meetingDocumentDownloadInProgressId = '';
+  state.meetingDocumentDownloadError = '';
   renderViews();
 }
 
@@ -3880,6 +3994,9 @@ function renderDashboard(meetings) {
 
 function renderMeetingsPage() {
   const meetings = getVisibleMeetings();
+  const deletionWarning = state.meetingDeletionWarning
+    ? `<p class="import-error" role="status">${escapeHtml(state.meetingDeletionWarning)}</p>`
+    : '';
   const list = meetings.length
     ? meetings.map((meeting) => renderMeetingListItem(meeting)).join('')
     : renderEmptyState('No meetings found', 'Adjust your search terms or import a transcript.', 'Go to Import Transcript');
@@ -3899,6 +4016,7 @@ function renderMeetingsPage() {
           </select>
         </div>
       </div>
+      ${deletionWarning}
       <div class="meeting-list">${list}</div>
     </section>
   `;
@@ -4229,6 +4347,8 @@ function populateViewerContent(meeting) {
       const partner = getMeetingDisplayPartner(meeting);
       const tags = Array.isArray(meeting.tags) && meeting.tags.length ? meeting.tags.join(', ') : 'No tags captured yet.';
       const fileName = meeting.originalFileName ? meeting.originalFileName : 'No file name captured yet.';
+      const hasStoredDocument = Boolean(String(meeting.storagePath || '').trim());
+      const isDownloading = state.meetingDocumentDownloadInProgressId === meeting.id;
       const content = document.createElement('div');
       appendDetailLine(content, 'Subject', meeting.subject || 'No subject captured yet.');
       appendDetailLine(content, 'Customer', customer);
@@ -4237,6 +4357,52 @@ function populateViewerContent(meeting) {
       appendDetailLine(content, 'Date', meeting.date ? formatDate(meeting.date) : 'Date not available');
       appendDetailLine(content, 'Original file', fileName);
       appendDetailLine(content, 'Tags', tags);
+
+      const sourceDocumentPanel = document.createElement('div');
+      sourceDocumentPanel.className = 'import-preview-panel';
+      const sourceHeading = document.createElement('h5');
+      sourceHeading.textContent = 'Source document';
+      sourceDocumentPanel.appendChild(sourceHeading);
+
+      if (!hasStoredDocument) {
+        const unavailableText = document.createElement('p');
+        unavailableText.className = 'entity-meta';
+        unavailableText.textContent = 'No original document is stored for this meeting.';
+        sourceDocumentPanel.appendChild(unavailableText);
+      } else {
+        const nameLine = document.createElement('p');
+        nameLine.className = 'entity-meta';
+        nameLine.textContent = `File name: ${meeting.originalFileName || 'transcript.docx'}`;
+        sourceDocumentPanel.appendChild(nameLine);
+
+        const sizeLine = document.createElement('p');
+        sizeLine.className = 'entity-meta';
+        sizeLine.textContent = `File size: ${Number.isFinite(Number(meeting.originalFileSize)) ? formatFileSize(Number(meeting.originalFileSize)) : 'Unknown'}`;
+        sourceDocumentPanel.appendChild(sizeLine);
+
+        const typeLine = document.createElement('p');
+        typeLine.className = 'entity-meta';
+        typeLine.textContent = `File type: ${meeting.originalFileMimeType || 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'}`;
+        sourceDocumentPanel.appendChild(typeLine);
+
+        const downloadButton = document.createElement('button');
+        downloadButton.type = 'button';
+        downloadButton.className = 'secondary-button js-download-original-docx';
+        downloadButton.dataset.meetingId = meeting.id;
+        downloadButton.disabled = isDownloading;
+        downloadButton.textContent = isDownloading ? 'Downloading...' : 'Download Original DOCX';
+        sourceDocumentPanel.appendChild(downloadButton);
+
+        if (state.meetingDocumentDownloadError) {
+          const errorLine = document.createElement('p');
+          errorLine.className = 'import-error';
+          errorLine.setAttribute('role', 'alert');
+          errorLine.textContent = state.meetingDocumentDownloadError;
+          sourceDocumentPanel.appendChild(errorLine);
+        }
+      }
+
+      content.appendChild(sourceDocumentPanel);
       block.appendChild(content);
       break;
     }
@@ -4597,6 +4763,155 @@ function triggerBackupDownload(payload) {
   }
 }
 
+function triggerBlobDownload(blob, downloadName) {
+  if (typeof document === 'undefined' || typeof window === 'undefined' || !(blob instanceof Blob)) {
+    return false;
+  }
+
+  try {
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = downloadUrl;
+    anchor.download = downloadName || 'download.bin';
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.URL.revokeObjectURL(downloadUrl);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function uploadOriginalTranscriptToSupabase(file, meetingId) {
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    return {
+      success: false,
+      error: 'You must be signed in to upload the original document.'
+    };
+  }
+
+  const validation = getValidatedImportDocxFile(file);
+  if (!validation.valid) {
+    return {
+      success: false,
+      error: validation.error
+    };
+  }
+
+  const storagePath = buildTranscriptStoragePath(authState.user.id, meetingId, file.name);
+  try {
+    const { error } = await supabaseClient
+      .storage
+      .from(TRANSCRIPT_STORAGE_BUCKET)
+      .upload(storagePath, file, {
+        upsert: false,
+        contentType: String(file.type || '').trim() || DOCX_MIME_TYPES[0]
+      });
+
+    if (error) {
+      return {
+        success: false,
+        error: 'Unable to upload the original DOCX to Supabase Storage. Meeting was not saved.'
+      };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: 'Unable to upload the original DOCX to Supabase Storage. Meeting was not saved.'
+    };
+  }
+
+  return {
+    success: true,
+    storageBucket: TRANSCRIPT_STORAGE_BUCKET,
+    storagePath,
+    originalFileName: String(file.name || '').trim(),
+    originalFileSize: Number.isFinite(Number(file.size)) ? Math.trunc(Number(file.size)) : null,
+    originalFileMimeType: String(file.type || '').trim() || DOCX_MIME_TYPES[0]
+  };
+}
+
+async function deleteStoredTranscriptFile(storageBucket, storagePath) {
+  const bucketName = String(storageBucket || '').trim();
+  const objectPath = String(storagePath || '').trim();
+
+  if (!supabaseClient || !bucketName || !objectPath) {
+    return { success: true };
+  }
+
+  try {
+    const { error } = await supabaseClient
+      .storage
+      .from(bucketName)
+      .remove([objectPath]);
+
+    if (error) {
+      return {
+        success: false,
+        error: 'Storage cleanup failed.'
+      };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      error: 'Storage cleanup failed.'
+    };
+  }
+
+  return { success: true };
+}
+
+async function downloadOriginalMeetingDocument(meetingId) {
+  const meeting = getMeetingById(meetingId);
+  if (!meeting) {
+    return;
+  }
+
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.meetingDocumentDownloadError = 'You must be signed in to download the original document.';
+    renderViews();
+    return;
+  }
+
+  const bucketName = String(meeting.storageBucket || '').trim();
+  const objectPath = String(meeting.storagePath || '').trim();
+  if (!bucketName || !objectPath) {
+    state.meetingDocumentDownloadError = 'No original document is stored for this meeting.';
+    renderViews();
+    return;
+  }
+
+  state.meetingDocumentDownloadInProgressId = meetingId;
+  state.meetingDocumentDownloadError = '';
+  renderViews();
+
+  try {
+    const { data, error } = await supabaseClient
+      .storage
+      .from(bucketName)
+      .download(objectPath);
+
+    if (error || !data) {
+      state.meetingDocumentDownloadInProgressId = '';
+      state.meetingDocumentDownloadError = 'Unable to download the original DOCX right now.';
+      renderViews();
+      return;
+    }
+
+    const fileName = sanitizeDocxStorageFileName(meeting.originalFileName || 'transcript.docx');
+    const downloaded = triggerBlobDownload(data, fileName);
+    state.meetingDocumentDownloadInProgressId = '';
+    state.meetingDocumentDownloadError = downloaded ? '' : 'The DOCX was downloaded from Supabase but could not be saved in the browser.';
+    renderViews();
+  } catch (error) {
+    state.meetingDocumentDownloadInProgressId = '';
+    state.meetingDocumentDownloadError = 'Unable to download the original DOCX right now.';
+    renderViews();
+  }
+}
+
 function handleExportBackup() {
   clearDataManagementMessages();
   const payload = buildBackupPayload();
@@ -4916,6 +5231,9 @@ function renderImport() {
   const successMessage = state.importSuccessMessage
     ? `<p class="import-success" role="status">${escapeHtml(state.importSuccessMessage)}</p>`
     : '';
+  const saveStatusMessage = state.importSaveInProgress && state.importSaveStatus
+    ? `<p class="import-hint" role="status">${escapeHtml(state.importSaveStatus)}</p>`
+    : '';
   const fileSummary = selectedFile
     ? `
       <div class="import-file-summary" role="status">
@@ -5076,6 +5394,7 @@ function renderImport() {
 
       ${errorMessage}
       ${successMessage}
+      ${saveStatusMessage}
       ${extractionStatus}
       ${extractionError}
       ${fileSummary}
@@ -5165,30 +5484,22 @@ async function handleImportFileSelection(file) {
   }
 
   state.importSuccessMessage = '';
+  state.importSaveStatus = '';
   state.importExtractionError = '';
   state.importExtractedText = '';
   state.importExtractedHtml = '';
   state.importExtractedSections = createEmptyExtractedSections();
   state.importReview = createEmptyImportReview();
 
-  if (!file.name.toLowerCase().endsWith('.docx')) {
+  const fileValidation = getValidatedImportDocxFile(file);
+  if (!fileValidation.valid) {
     state.importSelectedFile = null;
-    state.importError = 'Unsupported file type. Please choose a .docx file.';
+    state.importError = fileValidation.error;
     renderViews();
     return;
   }
 
-  if (file.size > MAX_IMPORT_FILE_SIZE_BYTES) {
-    state.importSelectedFile = null;
-    state.importError = 'The selected file is too large. Please choose a file smaller than 10 MB.';
-    renderViews();
-    return;
-  }
-
-  state.importSelectedFile = {
-    name: file.name,
-    size: file.size
-  };
+  state.importSelectedFile = file;
   state.importError = '';
   state.importExtracting = true;
   renderViews();
@@ -5213,7 +5524,7 @@ async function handleImportFileSelection(file) {
   }
 }
 
-function handleSaveMeeting() {
+async function handleSaveMeeting() {
   if (state.importSaveInProgress || !canSaveMeeting()) {
     return;
   }
@@ -5228,7 +5539,39 @@ function handleSaveMeeting() {
 
   state.importError = '';
   state.importSuccessMessage = '';
+  state.importSaveStatus = '';
   state.importSaveInProgress = true;
+  renderViews();
+  updateImportSaveButtonState();
+
+  const fileValidation = getValidatedImportDocxFile(state.importSelectedFile);
+  if (!fileValidation.valid) {
+    state.importError = fileValidation.error;
+    state.importSaveInProgress = false;
+    state.importSaveStatus = '';
+    renderViews();
+    updateImportSaveButtonState();
+    return;
+  }
+
+  const sourceFile = fileValidation.file;
+  const meetingId = createMeetingId();
+
+  state.importSaveStatus = 'Uploading original document...';
+  renderViews();
+  updateImportSaveButtonState();
+
+  const uploadResult = await uploadOriginalTranscriptToSupabase(sourceFile, meetingId);
+  if (!uploadResult.success) {
+    state.importError = uploadResult.error;
+    state.importSaveInProgress = false;
+    state.importSaveStatus = '';
+    renderViews();
+    updateImportSaveButtonState();
+    return;
+  }
+
+  state.importSaveStatus = 'Saving meeting metadata...';
   renderViews();
   updateImportSaveButtonState();
 
@@ -5245,7 +5588,7 @@ function handleSaveMeeting() {
     .filter(Boolean);
 
   const meeting = {
-    id: createMeetingId(),
+    id: meetingId,
     title,
     date: normalizeExtractedDate(date) || '',
     dateText: state.importReview.dateText || date,
@@ -5272,7 +5615,11 @@ function handleSaveMeeting() {
       heading: section.heading,
       lines: [...section.lines]
     })),
-    originalFileName: state.importSelectedFile ? state.importSelectedFile.name : '',
+    storageBucket: uploadResult.storageBucket,
+    storagePath: uploadResult.storagePath,
+    originalFileName: uploadResult.originalFileName,
+    originalFileSize: uploadResult.originalFileSize,
+    originalFileMimeType: uploadResult.originalFileMimeType,
     customer,
     partner,
     participants,
@@ -5282,36 +5629,38 @@ function handleSaveMeeting() {
 
   const meetingRow = mapMeetingToDatabaseRow(meeting, authState.user.id);
 
-  supabaseClient
+  const { data, error } = await supabaseClient
     .from('meetings')
     .insert(meetingRow)
     .select(MEETING_ROW_COLUMNS)
-    .single()
-    .then(({ data, error }) => {
-      if (error || !data) {
-        state.importError = 'Unable to save the meeting to Supabase. Please try again.';
-        state.importSaveInProgress = false;
-        renderViews();
-        updateImportSaveButtonState();
-        return;
-      }
+    .single();
 
-      const savedMeeting = mapDatabaseRowToMeeting(data);
-      state.savedMeetings = [savedMeeting, ...state.savedMeetings].sort(compareMeetingsNewestFirst);
-      state.importSelectedFile = null;
-      state.importReview = createEmptyImportReview();
-      state.importExtracting = false;
-      state.importExtractionError = '';
-      state.importExtractedText = '';
-      state.importExtractedHtml = '';
-      state.importExtractedSections = createEmptyExtractedSections();
-      state.importSuccessMessage = `Meeting saved successfully as ${savedMeeting.title}.`;
-      state.importSaveInProgress = false;
-      renderViews();
-      updateImportSaveButtonState();
-    });
+  if (error || !data) {
+    const cleanupResult = await deleteStoredTranscriptFile(uploadResult.storageBucket, uploadResult.storagePath);
+    state.importError = cleanupResult.success
+      ? 'Unable to save meeting metadata to Supabase. The uploaded document was rolled back.'
+      : 'Unable to save meeting metadata to Supabase, and the uploaded document could not be rolled back automatically.';
+    state.importSaveInProgress = false;
+    state.importSaveStatus = '';
+    renderViews();
+    updateImportSaveButtonState();
+    return;
+  }
 
-  return;
+  const savedMeeting = mapDatabaseRowToMeeting(data);
+  state.savedMeetings = [savedMeeting, ...state.savedMeetings].sort(compareMeetingsNewestFirst);
+  state.importSelectedFile = null;
+  state.importReview = createEmptyImportReview();
+  state.importExtracting = false;
+  state.importExtractionError = '';
+  state.importExtractedText = '';
+  state.importExtractedHtml = '';
+  state.importExtractedSections = createEmptyExtractedSections();
+  state.importSuccessMessage = `Meeting saved successfully as ${savedMeeting.title}.`;
+  state.importSaveInProgress = false;
+  state.importSaveStatus = '';
+  renderViews();
+  updateImportSaveButtonState();
 }
 
 function getCloudMeetingMigrationReport(result) {
@@ -5712,8 +6061,21 @@ function attachInteractions() {
       state.meetingEditMode = false;
       state.meetingEditDraft = null;
       state.meetingEditError = '';
+      state.meetingDocumentDownloadInProgressId = '';
+      state.meetingDocumentDownloadError = '';
       state.activeViewerTab = 'overview';
       renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-download-original-docx').forEach((button) => {
+    button.addEventListener('click', () => {
+      const meetingId = button.dataset.meetingId;
+      if (!meetingId) {
+        return;
+      }
+
+      downloadOriginalMeetingDocument(meetingId);
     });
   });
 
@@ -5797,6 +6159,8 @@ function attachInteractions() {
       state.meetingEditDraft = null;
       state.meetingEditError = '';
       state.meetingReturnContext = null;
+      state.meetingDocumentDownloadInProgressId = '';
+      state.meetingDocumentDownloadError = '';
       renderViews();
     });
   });
