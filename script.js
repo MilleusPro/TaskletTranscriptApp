@@ -9,10 +9,309 @@ const sampleData = {
 const MAX_IMPORT_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 const STORAGE_KEY = 'taskletTranscriptApp.meetings';
 const ACTION_OVERRIDES_STORAGE_KEY = 'taskletTranscriptApp.actionOverrides';
+const SETTINGS_STORAGE_KEY = 'taskletTranscriptApp.settings';
+const BACKUP_APP_NAME = 'Tasklet Transcript App';
+const BACKUP_VERSION = 1;
 const ACTION_STATUSES = ['Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled'];
 const ACTION_FILTERS = ['All', 'Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled', 'Overdue', 'No due date'];
 const SEARCH_MIN_CHARS = 2;
 const SEARCH_DEBOUNCE_MS = 180;
+const AUTH_ERROR_MESSAGE = 'Unable to sign in. Check your email and password and try again.';
+
+let supabaseClient = null;
+let authSubscription = null;
+let appInitialized = false;
+let authFormBound = false;
+
+const authState = {
+  checking: true,
+  signingIn: false,
+  user: null,
+  error: '',
+  status: 'Checking session...'
+};
+
+function getAuthElements() {
+  return {
+    authView: document.getElementById('auth-view'),
+    appShell: document.getElementById('app-shell'),
+    status: document.getElementById('auth-status'),
+    error: document.getElementById('auth-error'),
+    form: document.getElementById('login-form'),
+    email: document.getElementById('login-email'),
+    password: document.getElementById('login-password'),
+    submit: document.getElementById('sign-in-button')
+  };
+}
+
+function getSupabaseClientInitializationResult() {
+  if (!window.supabase || typeof window.supabase.createClient !== 'function') {
+    return {
+      client: null,
+      error: 'Supabase client library is unavailable. Verify the Supabase browser script is loaded.'
+    };
+  }
+
+  const url = typeof SUPABASE_URL === 'string' ? SUPABASE_URL.trim() : '';
+  const publishableKey = typeof SUPABASE_PUBLISHABLE_KEY === 'string' ? SUPABASE_PUBLISHABLE_KEY.trim() : '';
+
+  if (!url || !publishableKey) {
+    return {
+      client: null,
+      error: 'Supabase authentication is not configured. Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in supabase-config.js.'
+    };
+  }
+
+  try {
+    return {
+      client: window.supabase.createClient(url, publishableKey),
+      error: ''
+    };
+  } catch (error) {
+    return {
+      client: null,
+      error: 'Supabase client initialization failed. Check your Supabase configuration values.'
+    };
+  }
+}
+
+function isSessionMissingError(error) {
+  if (!error || typeof error.message !== 'string') {
+    return false;
+  }
+
+  const normalized = error.message.toLowerCase();
+  return normalized.includes('auth session missing') || normalized.includes('session not found');
+}
+
+function setupLogoFallbacks() {
+  document.querySelectorAll('.js-tasklet-logo').forEach((logo) => {
+    logo.addEventListener('error', () => {
+      logo.classList.add('logo-load-failed');
+    });
+  });
+}
+
+function setAuthFormDisabled(disabled) {
+  const { form, email, password, submit } = getAuthElements();
+  if (form) {
+    form.querySelectorAll('input, button').forEach((field) => {
+      field.disabled = disabled;
+    });
+  }
+  if (email) {
+    email.disabled = disabled;
+  }
+  if (password) {
+    password.disabled = disabled;
+  }
+  if (submit) {
+    submit.disabled = disabled;
+    submit.textContent = authState.signingIn ? 'Signing In...' : 'Sign In';
+  }
+}
+
+function updateAuthView() {
+  const { authView, status, error } = getAuthElements();
+
+  if (authView) {
+    authView.hidden = Boolean(authState.user);
+  }
+
+  if (status) {
+    const statusText = authState.status || '';
+    status.textContent = statusText;
+    status.hidden = !statusText;
+  }
+
+  if (error) {
+    const errorText = authState.error || '';
+    error.textContent = errorText;
+    error.hidden = !errorText;
+  }
+
+  const shouldDisable = authState.checking || authState.signingIn || !supabaseClient;
+  setAuthFormDisabled(shouldDisable);
+}
+
+function clearAppViewPanels() {
+  mainPanelIds.forEach((panelId) => {
+    const panel = document.getElementById(panelId);
+    if (panel) {
+      panel.innerHTML = '';
+    }
+  });
+}
+
+function updateSignedInUserPanel() {
+  const userPanel = document.querySelector('.js-auth-user-panel');
+  const userEmail = document.querySelector('.js-auth-user-email');
+
+  if (!userPanel || !userEmail) {
+    return;
+  }
+
+  if (!authState.user || !authState.user.email) {
+    userPanel.hidden = true;
+    userEmail.textContent = '';
+    return;
+  }
+
+  userEmail.textContent = authState.user.email;
+  userPanel.hidden = false;
+}
+
+function setAppAuthenticated(user) {
+  const { appShell } = getAuthElements();
+
+  authState.user = user || null;
+  authState.checking = false;
+  authState.signingIn = false;
+
+  if (appShell) {
+    appShell.hidden = !authState.user;
+  }
+
+  updateSignedInUserPanel();
+  updateAuthView();
+
+  if (!authState.user) {
+    clearAppViewPanels();
+    return;
+  }
+
+  if (!appInitialized) {
+    init();
+    appInitialized = true;
+    return;
+  }
+
+  renderViews();
+}
+
+async function handleLoginSubmit(event) {
+  event.preventDefault();
+
+  if (!supabaseClient || authState.signingIn || authState.checking) {
+    return;
+  }
+
+  const { email, password } = getAuthElements();
+  const emailValue = email ? email.value.trim() : '';
+  const passwordValue = password ? password.value : '';
+
+  if (!emailValue || !passwordValue) {
+    authState.error = AUTH_ERROR_MESSAGE;
+    authState.status = '';
+    updateAuthView();
+    return;
+  }
+
+  authState.error = '';
+  authState.signingIn = true;
+  authState.status = 'Signing in...';
+  updateAuthView();
+
+  const { error } = await supabaseClient.auth.signInWithPassword({
+    email: emailValue,
+    password: passwordValue
+  });
+
+  if (error) {
+    authState.signingIn = false;
+    authState.status = '';
+    authState.error = AUTH_ERROR_MESSAGE;
+    updateAuthView();
+    return;
+  }
+
+  authState.signingIn = false;
+  authState.status = 'Signed in. Loading workspace...';
+  updateAuthView();
+}
+
+async function handleSignOut() {
+  if (!supabaseClient) {
+    return;
+  }
+
+  const { error } = await supabaseClient.auth.signOut();
+  if (error) {
+    authState.error = 'Unable to sign out right now. Please try again.';
+    updateAuthView();
+  }
+}
+
+function ensureAuthFormBinding() {
+  if (authFormBound) {
+    return;
+  }
+
+  const { form } = getAuthElements();
+  if (!form) {
+    return;
+  }
+
+  form.addEventListener('submit', handleLoginSubmit);
+  authFormBound = true;
+}
+
+function subscribeToAuthChanges() {
+  if (!supabaseClient || authSubscription) {
+    return;
+  }
+
+  const subscriptionResult = supabaseClient.auth.onAuthStateChange((_event, session) => {
+    const nextUser = session && session.user ? session.user : null;
+    authState.error = '';
+    authState.status = '';
+    setAppAuthenticated(nextUser);
+  });
+
+  authSubscription = subscriptionResult && subscriptionResult.data ? subscriptionResult.data.subscription : null;
+}
+
+async function bootstrapAuthentication() {
+  ensureAuthFormBinding();
+
+  const { client, error } = getSupabaseClientInitializationResult();
+  supabaseClient = client;
+
+  if (!supabaseClient) {
+    authState.checking = false;
+    authState.status = '';
+    authState.error = error;
+    setAppAuthenticated(null);
+    return;
+  }
+
+  authState.checking = true;
+  authState.error = '';
+  authState.status = 'Checking session...';
+  updateAuthView();
+
+  const { data, error: getUserError } = await supabaseClient.auth.getUser();
+  if (getUserError && !isSessionMissingError(getUserError)) {
+    authState.error = 'Unable to verify the current session. Please sign in.';
+    authState.status = '';
+  }
+
+  const existingUser = data && data.user ? data.user : null;
+  setAppAuthenticated(existingUser);
+  subscribeToAuthChanges();
+}
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function estimateStringBytes(value) {
+  if (typeof Blob !== 'undefined') {
+    return new Blob([String(value || '')]).size;
+  }
+
+  return String(value || '').length;
+}
 
 function createEmptyImportReview() {
   return {
@@ -787,6 +1086,144 @@ function writeStoredMeetings(meetings) {
   }
 }
 
+function readStoredSettings() {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return {};
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!rawValue) {
+      return {};
+    }
+
+    const parsedValue = JSON.parse(rawValue);
+    return isPlainObject(parsedValue) ? parsedValue : {};
+  } catch (error) {
+    return {};
+  }
+}
+
+function getStorageSnapshot(keys) {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return {};
+  }
+
+  return keys.reduce((snapshot, key) => {
+    snapshot[key] = window.localStorage.getItem(key);
+    return snapshot;
+  }, {});
+}
+
+function restoreStorageSnapshot(snapshot) {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return true;
+  }
+
+  try {
+    Object.entries(snapshot || {}).forEach(([key, rawValue]) => {
+      if (typeof rawValue === 'string') {
+        window.localStorage.setItem(key, rawValue);
+      } else {
+        window.localStorage.removeItem(key);
+      }
+    });
+
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function applyLocalDataReplacement(nextData) {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return {
+      success: false,
+      error: 'Browser storage is not available in this environment.'
+    };
+  }
+
+  const snapshot = getStorageSnapshot([STORAGE_KEY, ACTION_OVERRIDES_STORAGE_KEY, SETTINGS_STORAGE_KEY]);
+
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextData.meetings));
+    window.localStorage.setItem(ACTION_OVERRIDES_STORAGE_KEY, JSON.stringify(nextData.actionOverrides));
+    window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(nextData.settings));
+  } catch (error) {
+    const rollbackSucceeded = restoreStorageSnapshot(snapshot);
+    return {
+      success: false,
+      error: rollbackSucceeded
+        ? 'Failed to write backup data to local storage. Existing data was restored.'
+        : 'Failed to write backup data, and rollback could not be completed safely.'
+    };
+  }
+
+  return { success: true };
+}
+
+function getNormalizedActionOverridesArray(overrides) {
+  const records = Array.isArray(overrides) ? overrides : Object.values(overrides || {});
+  return records
+    .map((record) => sanitizeActionOverrideRecord(record))
+    .filter(Boolean)
+    .sort((first, second) => first.actionId.localeCompare(second.actionId));
+}
+
+function buildBackupPayload() {
+  return {
+    app: BACKUP_APP_NAME,
+    version: BACKUP_VERSION,
+    exportedAt: new Date().toISOString(),
+    data: {
+      meetings: readStoredMeetings(),
+      actionOverrides: getNormalizedActionOverridesArray(readStoredActionOverrides()),
+      settings: readStoredSettings()
+    }
+  };
+}
+
+function validateBackupPayload(payload) {
+  if (!isPlainObject(payload)) {
+    return { valid: false, error: 'The selected file is not a valid backup object.' };
+  }
+
+  if (payload.app !== BACKUP_APP_NAME) {
+    return { valid: false, error: `Unsupported backup app. Expected "${BACKUP_APP_NAME}".` };
+  }
+
+  if (payload.version !== BACKUP_VERSION) {
+    return { valid: false, error: `Unsupported backup version: ${payload.version}.` };
+  }
+
+  if (!isPlainObject(payload.data)) {
+    return { valid: false, error: 'Backup is missing a valid data object.' };
+  }
+
+  const { meetings, actionOverrides, settings } = payload.data;
+
+  if (!Array.isArray(meetings)) {
+    return { valid: false, error: 'Backup data is invalid: meetings must be an array.' };
+  }
+
+  if (!Array.isArray(actionOverrides)) {
+    return { valid: false, error: 'Backup data is invalid: actionOverrides must be an array.' };
+  }
+
+  if (typeof settings !== 'undefined' && !isPlainObject(settings)) {
+    return { valid: false, error: 'Backup data is invalid: settings must be an object when provided.' };
+  }
+
+  return {
+    valid: true,
+    data: {
+      meetings: meetings.map((meeting) => normalizeMeetingRecord(meeting)),
+      actionOverrides: getNormalizedActionOverridesArray(actionOverrides),
+      settings: isPlainObject(settings) ? settings : {}
+    }
+  };
+}
+
 function createMeetingId() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
     return crypto.randomUUID();
@@ -896,6 +1333,7 @@ const state = {
   searchActiveIndex: -1,
   searchHighlightedActionId: '',
   savedMeetings: readStoredMeetings(),
+  savedSettings: readStoredSettings(),
   importSelectedFile: null,
   importError: '',
   importSuccessMessage: '',
@@ -910,7 +1348,12 @@ const state = {
     blocks: [],
     metadata: {},
     headings: []
-  }
+  },
+  dataManagementError: '',
+  dataManagementSuccess: '',
+  dataManagementLastExportAt: '',
+  dataManagementSelectedBackupFile: null,
+  dataManagementSelectedBackupName: ''
 };
 
 function isSavedMeetingEditable(meetingId) {
@@ -1138,10 +1581,11 @@ const sectionTitles = {
   partners: 'Partners',
   participants: 'Participants',
   actions: 'Actions',
+  dataManagement: 'Data Management',
   import: 'Import Transcript'
 };
 
-const mainPanelIds = ['dashboard-view', 'meetings-view', 'customers-view', 'partners-view', 'participants-view', 'actions-view', 'import-view'];
+const mainPanelIds = ['dashboard-view', 'meetings-view', 'customers-view', 'partners-view', 'participants-view', 'actions-view', 'dataManagement-view', 'import-view'];
 const viewerTabs = ['overview', 'summary', 'decisions', 'actions', 'questions', 'commercial', 'additionalSections', 'transcript'];
 
 function closeSearchResults(clearQuery = false) {
@@ -1257,6 +1701,7 @@ function openSearchResult(result) {
 function init() {
   const navigationButtons = document.querySelectorAll('.nav-button');
   const searchInput = document.getElementById('global-search');
+  const signOutButton = document.querySelector('.js-auth-sign-out');
 
   navigationButtons.forEach((button) => {
     button.addEventListener('click', () => {
@@ -1333,6 +1778,12 @@ function init() {
     });
   }
 
+  if (signOutButton) {
+    signOutButton.addEventListener('click', () => {
+      handleSignOut();
+    });
+  }
+
   renderViews();
 }
 
@@ -1354,6 +1805,10 @@ function updateNavigation(buttons) {
 }
 
 function renderViews() {
+  if (!authState.user) {
+    return;
+  }
+
   const viewSections = {
     dashboard: document.getElementById('dashboard-view'),
     meetings: document.getElementById('meetings-view'),
@@ -1361,6 +1816,7 @@ function renderViews() {
     partners: document.getElementById('partners-view'),
     participants: document.getElementById('participants-view'),
     actions: document.getElementById('actions-view'),
+    dataManagement: document.getElementById('dataManagement-view'),
     import: document.getElementById('import-view')
   };
 
@@ -1392,6 +1848,7 @@ function renderViews() {
   viewSections.partners.innerHTML = renderPartners();
   viewSections.participants.innerHTML = renderParticipants();
   viewSections.actions.innerHTML = renderActions();
+  viewSections.dataManagement.innerHTML = renderDataManagement();
   viewSections.import.innerHTML = renderImport();
 
   updateNavigation(Array.from(document.querySelectorAll('.nav-button')).map((button) => ({
@@ -2464,6 +2921,41 @@ function getPartnerGroupByKey(groupKey) {
   return getPartnersFromMeetings().find((group) => group.key === groupKey) || null;
 }
 
+function renderEmptyState(title, message, actionLabel = '') {
+  const actionButton = actionLabel
+    ? `<button class="secondary-button js-go-import" type="button">${escapeHtml(actionLabel)}</button>`
+    : '';
+
+  return `
+    <div class="empty-state">
+      <h4>${escapeHtml(title)}</h4>
+      <p>${escapeHtml(message)}</p>
+      ${actionButton}
+    </div>
+  `;
+}
+
+function getActionStatusClass(action) {
+  if (isActionOverdue(action)) {
+    return 'status-pill status-pill--overdue';
+  }
+
+  const map = {
+    Open: 'status-pill status-pill--open',
+    'In Progress': 'status-pill status-pill--in-progress',
+    'Waiting for Customer': 'status-pill status-pill--waiting-customer',
+    'Waiting Internally': 'status-pill status-pill--waiting-internal',
+    Completed: 'status-pill status-pill--completed',
+    Cancelled: 'status-pill status-pill--cancelled'
+  };
+
+  return map[action.status] || 'status-pill';
+}
+
+function getActionStatusLabel(action) {
+  return isActionOverdue(action) ? 'Overdue' : (action.status || 'Open');
+}
+
 function renderDashboard(meetings) {
   const totalMeetings = getAllMeetings().length;
   const totalCustomers = getCustomersFromMeetings().length;
@@ -2473,15 +2965,18 @@ function renderDashboard(meetings) {
   const recentMeetings = meetings.slice(0, 3);
   const followUps = combinedActions.filter((action) => !isActionClosed(action)).slice(0, 3);
   const hasRealData = totalMeetings > 0 || combinedActions.length > 0;
-  const emptyState = hasRealData ? '' : '<div class="empty-state">No meetings have been saved yet. Import a transcript to start building your meeting knowledge base.</div>';
+  const emptyState = hasRealData
+    ? ''
+    : renderEmptyState('No meeting data yet', 'Import a transcript to start building your meeting knowledge base.', 'Go to Import Transcript');
 
   return `
-    <section class="hero-panel">
+    <section class="hero-panel dashboard-banner">
       <div>
-        <p class="eyebrow">Overview</p>
-        <h3>Keep customer, partner, and follow-up activity in one calm workspace.</h3>
+        <p class="eyebrow">Dashboard</p>
+        <h3>Meeting Knowledge Base</h3>
+        <p>Keep track of customer conversations, decisions, and follow-ups.</p>
       </div>
-      <p>Review recent meetings, track follow-ups, and keep key customer conversations in one place.</p>
+      <p class="dashboard-banner-summary">${openActions} open actions across ${totalMeetings} meetings</p>
     </section>
 
     <section class="statistics" aria-label="Overview statistics">
@@ -2509,7 +3004,7 @@ function renderDashboard(meetings) {
           <h3>Recent Meetings</h3>
         </div>
         <div class="meeting-list">
-          ${recentMeetings.length ? recentMeetings.map((meeting) => renderMeetingCard(meeting)).join('') : '<div class="empty-state">No meetings match the current search.</div>'}
+          ${recentMeetings.length ? recentMeetings.map((meeting) => renderMeetingCard(meeting)).join('') : renderEmptyState('No meetings found', 'Try a different search or import a new transcript.', 'Go to Import Transcript')}
         </div>
       </div>
 
@@ -2518,7 +3013,7 @@ function renderDashboard(meetings) {
           <h3>Open Follow-ups</h3>
         </div>
         <div class="action-list">
-          ${followUps.length ? followUps.map((action) => renderActionCard(action, { editable: false })).join('') : '<div class="empty-state">No follow-ups available.</div>'}
+          ${followUps.length ? followUps.map((action) => renderActionCard(action, { editable: false })).join('') : renderEmptyState('No open follow-ups', 'Action items from meetings will appear here once available.')}
         </div>
       </div>
     </section>
@@ -2531,7 +3026,7 @@ function renderMeetingsPage() {
   const meetings = getVisibleMeetings();
   const list = meetings.length
     ? meetings.map((meeting) => renderMeetingListItem(meeting)).join('')
-    : '<div class="empty-state">No meetings match the current search.</div>';
+    : renderEmptyState('No meetings found', 'Adjust your search terms or import a transcript.', 'Go to Import Transcript');
 
   return `
     <section class="panel-card">
@@ -2911,7 +3406,7 @@ function renderCustomers() {
         returnSection: 'customers',
         returnKey: selectedCustomer.key
       })).join('')
-      : '<div class="empty-state">No meetings available for this customer yet.</div>';
+      : renderEmptyState('No meetings for this customer', 'This customer appears in saved records but has no visible meeting history yet.');
 
     return `
       <section class="panel-card">
@@ -2971,7 +3466,7 @@ function renderCustomers() {
         </button>
       `;
     }).join('')
-    : '<div class="empty-state">No customer names were found in the available meetings.</div>';
+    : renderEmptyState('No customers found', 'Customer records are derived from saved meetings.', 'Go to Import Transcript');
 
   return `
     <section class="panel-card">
@@ -3000,7 +3495,7 @@ function renderPartners() {
         returnSection: 'partners',
         returnKey: selectedPartner.key
       })).join('')
-      : '<div class="empty-state">No meetings available for this partner yet.</div>';
+      : renderEmptyState('No meetings for this partner', 'This partner has no visible meeting history yet.');
 
     return `
       <section class="panel-card">
@@ -3059,7 +3554,7 @@ function renderPartners() {
         </button>
       `;
     }).join('')
-    : '<div class="empty-state">No partner names were found in the available meetings.</div>';
+    : renderEmptyState('No partners found', 'Partner records are derived from saved meetings.', 'Go to Import Transcript');
 
   return `
     <section class="panel-card">
@@ -3090,7 +3585,7 @@ function renderParticipants() {
         returnSection: 'participants',
         returnKey: selectedParticipant.key
       })).join('')
-      : '<div class="empty-state">No meetings available for this participant yet.</div>';
+      : renderEmptyState('No meetings for this participant', 'This participant currently has no visible meeting history.');
 
     return `
       <section class="panel-card">
@@ -3149,7 +3644,7 @@ function renderParticipants() {
         </button>
       `;
     }).join('')
-    : '<div class="empty-state">No participant names were found in the available meetings.</div>';
+    : renderEmptyState('No participants found', 'Participants are extracted from saved meetings.', 'Go to Import Transcript');
 
   return `
     <section class="panel-card">
@@ -3167,7 +3662,7 @@ function renderActions() {
   const visibleActions = filterCombinedActions(combinedActions, selectedFilter);
   const list = visibleActions.length
     ? visibleActions.map((action) => renderActionCard(action, { editable: true, returnSection: 'actions' })).join('')
-    : '<div class="empty-state">No actions match the selected filter.</div>';
+    : renderEmptyState('No actions match this filter', 'Try a different status filter or import another meeting.', 'Go to Import Transcript');
 
   const filterOptions = ACTION_FILTERS.map((filter) => `
     <option value="${escapeHtml(filter)}" ${filter === selectedFilter ? 'selected' : ''}>${escapeHtml(filter)}</option>
@@ -3186,6 +3681,252 @@ function renderActions() {
         </div>
       </div>
       <div class="action-list">${list}</div>
+    </section>
+  `;
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return 'Not exported in this session';
+  }
+
+  const parsedDate = new Date(value);
+  if (!Number.isFinite(parsedDate.getTime())) {
+    return 'Not exported in this session';
+  }
+
+  return parsedDate.toLocaleString('en');
+}
+
+function getBackupSizeLabel() {
+  const payload = buildBackupPayload();
+  const serialized = JSON.stringify(payload);
+  return formatFileSize(estimateStringBytes(serialized));
+}
+
+function buildBackupFileName() {
+  const dateStamp = new Date().toISOString().slice(0, 10);
+  return `tasklet-transcript-backup-${dateStamp}.json`;
+}
+
+function clearDataManagementMessages() {
+  state.dataManagementError = '';
+  state.dataManagementSuccess = '';
+}
+
+function triggerBackupDownload(payload) {
+  if (typeof document === 'undefined' || typeof window === 'undefined') {
+    return false;
+  }
+
+  try {
+    const backupJson = JSON.stringify(payload, null, 2);
+    const blob = new Blob([backupJson], { type: 'application/json' });
+    const downloadUrl = window.URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = downloadUrl;
+    anchor.download = buildBackupFileName();
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.URL.revokeObjectURL(downloadUrl);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+function handleExportBackup() {
+  clearDataManagementMessages();
+  const payload = buildBackupPayload();
+  const exported = triggerBackupDownload(payload);
+
+  if (!exported) {
+    state.dataManagementError = 'Export failed. Please try again.';
+    renderViews();
+    return;
+  }
+
+  state.dataManagementLastExportAt = payload.exportedAt;
+  state.dataManagementSuccess = `Backup exported as ${buildBackupFileName()}.`;
+  renderViews();
+}
+
+function resetStateAfterDataReplacement() {
+  state.savedMeetings = readStoredMeetings();
+  state.actionOverrides = readStoredActionOverrides();
+  state.savedSettings = readStoredSettings();
+  state.selectedMeetingId = null;
+  state.meetingEditMode = false;
+  state.meetingEditDraft = null;
+  state.meetingEditError = '';
+  state.selectedCustomerKey = null;
+  state.selectedPartnerKey = null;
+  state.selectedParticipantKey = null;
+  state.meetingReturnContext = null;
+  state.searchHighlightedActionId = '';
+  state.searchResultsOpen = normalizeSearchQuery(state.searchQuery).length >= SEARCH_MIN_CHARS;
+  state.searchActiveIndex = -1;
+  state.activeViewerTab = 'overview';
+}
+
+async function handleRestoreBackup() {
+  clearDataManagementMessages();
+
+  const selectedFile = state.dataManagementSelectedBackupFile;
+  if (!selectedFile) {
+    state.dataManagementError = 'Select a backup JSON file before restoring.';
+    renderViews();
+    return;
+  }
+
+  let parsedPayload;
+  try {
+    const rawText = await selectedFile.text();
+    parsedPayload = JSON.parse(rawText);
+  } catch (error) {
+    state.dataManagementError = 'The selected file is not valid JSON or is damaged.';
+    renderViews();
+    return;
+  }
+
+  const validation = validateBackupPayload(parsedPayload);
+  if (!validation.valid) {
+    state.dataManagementError = validation.error;
+    renderViews();
+    return;
+  }
+
+  const confirmed = window.confirm(
+    'Restore this backup?\\n\\n'
+      + 'This will replace current browser data (meetings, action overrides, and settings).\\n'
+      + 'Export a backup first if you need to keep the current state.'
+  );
+
+  if (!confirmed) {
+    state.dataManagementSuccess = 'Restore canceled. Existing data was not changed.';
+    renderViews();
+    return;
+  }
+
+  const replacementResult = applyLocalDataReplacement(validation.data);
+  if (!replacementResult.success) {
+    state.dataManagementError = replacementResult.error;
+    renderViews();
+    return;
+  }
+
+  resetStateAfterDataReplacement();
+  state.dataManagementSelectedBackupFile = null;
+  state.dataManagementSelectedBackupName = '';
+  state.dataManagementSuccess = 'Backup restored successfully. Local browser data was replaced.';
+  renderViews();
+}
+
+function handleClearAllLocalData() {
+  clearDataManagementMessages();
+
+  const warningConfirmed = window.confirm(
+    'Clear all local data?\\n\\n'
+      + 'This removes all saved meetings and action overrides from this browser and resets app settings.'
+  );
+
+  if (!warningConfirmed) {
+    state.dataManagementSuccess = 'Clear data canceled. Existing data was not changed.';
+    renderViews();
+    return;
+  }
+
+  const strongConfirmation = window.prompt('Type CLEAR to permanently remove local browser data.');
+  if (strongConfirmation !== 'CLEAR') {
+    state.dataManagementError = 'Clear data canceled. Confirmation text did not match.';
+    renderViews();
+    return;
+  }
+
+  const replacementResult = applyLocalDataReplacement({
+    meetings: [],
+    actionOverrides: [],
+    settings: {}
+  });
+
+  if (!replacementResult.success) {
+    state.dataManagementError = replacementResult.error;
+    renderViews();
+    return;
+  }
+
+  resetStateAfterDataReplacement();
+  state.dataManagementSelectedBackupFile = null;
+  state.dataManagementSelectedBackupName = '';
+  state.dataManagementSuccess = 'All local browser data has been cleared.';
+  renderViews();
+}
+
+function renderDataManagement() {
+  const meetingCount = state.savedMeetings.length;
+  const actionOverrideCount = Object.keys(state.actionOverrides || {}).length;
+  const backupSizeLabel = getBackupSizeLabel();
+  const latestExportLabel = formatDateTime(state.dataManagementLastExportAt);
+  const errorMessage = state.dataManagementError
+    ? `<p class="import-error" role="alert">${escapeHtml(state.dataManagementError)}</p>`
+    : '';
+  const successMessage = state.dataManagementSuccess
+    ? `<p class="import-success" role="status">${escapeHtml(state.dataManagementSuccess)}</p>`
+    : '';
+  const selectedBackup = state.dataManagementSelectedBackupName
+    ? `<p class="entity-meta">Selected file: ${escapeHtml(state.dataManagementSelectedBackupName)}</p>`
+    : '<p class="entity-meta">No backup file selected.</p>';
+
+  return `
+    <section class="import-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Data management</p>
+          <h3>Backup and restore local browser data</h3>
+        </div>
+      </div>
+      <p class="import-description">Use backup export before making large changes. Restore replaces your current browser data.</p>
+
+      <div class="panel-card data-management-stats">
+        <p><strong>Saved meetings:</strong> ${meetingCount}</p>
+        <p><strong>Action overrides:</strong> ${actionOverrideCount}</p>
+        <p><strong>Approximate backup size:</strong> ${escapeHtml(backupSizeLabel)}</p>
+        <p><strong>Latest export this session:</strong> ${escapeHtml(latestExportLabel)}</p>
+      </div>
+
+      ${errorMessage}
+      ${successMessage}
+
+      <div class="import-preview-panel">
+        <div class="section-heading">
+          <h4>Export backup</h4>
+        </div>
+        <p class="entity-meta">Downloads meetings, action overrides, and settings as a JSON backup file.</p>
+        <button class="primary-button js-export-backup" type="button">Export Backup</button>
+      </div>
+
+      <div class="import-preview-panel">
+        <div class="section-heading">
+          <h4>Restore backup</h4>
+        </div>
+        <p class="entity-meta">Validate and restore a backup JSON file. Unknown fields are ignored safely.</p>
+        <div class="data-management-actions">
+          <input id="restore-backup-input" class="sr-only" type="file" accept=".json,application/json">
+          <button class="secondary-button js-select-restore-file" type="button">Choose Backup File</button>
+          <button class="primary-button js-restore-backup" type="button">Restore Backup</button>
+        </div>
+        ${selectedBackup}
+      </div>
+
+      <div class="import-preview-panel data-management-danger-zone">
+        <div class="section-heading">
+          <h4>Clear local data</h4>
+        </div>
+        <p class="entity-meta">This removes all saved meetings and action overrides from this browser. Export a backup first if needed.</p>
+        <button class="secondary-button data-management-danger-button js-clear-all-local-data" type="button">Clear All Local Data</button>
+      </div>
     </section>
   `;
 }
@@ -3395,7 +4136,7 @@ function renderMeetingCard(meeting) {
         <span class="badge">${escapeHtml(meeting.meetingType || 'Imported')}</span>
         <span>Participants: ${escapeHtml(participantNames)}</span>
       </div>
-      <button class="secondary-button js-open-meeting" type="button" data-meeting-id="${meeting.id}">Open details</button>
+      <button class="secondary-button meeting-card-action js-open-meeting" type="button" data-meeting-id="${meeting.id}">Open details</button>
     </article>
   `;
 }
@@ -3406,7 +4147,10 @@ function renderActionCard(action, options = {}) {
   const ownerLabel = action.owner || 'Unassigned';
   const notesLabel = action.notes || 'No notes';
   const dueDateLabel = action.dueDate ? formatDate(action.dueDate) : 'No due date';
+  const dueDateClass = isActionOverdue(action) ? 'action-due-date action-due-date--overdue' : 'action-due-date';
   const highlightedClass = state.searchHighlightedActionId === action.id ? ' action-card--highlighted' : '';
+  const statusClass = getActionStatusClass(action);
+  const statusLabel = getActionStatusLabel(action);
   const statusOptions = ACTION_STATUSES.map((status) => `
     <option value="${escapeHtml(status)}" ${status === action.status ? 'selected' : ''}>${escapeHtml(status)}</option>
   `).join('');
@@ -3414,17 +4158,18 @@ function renderActionCard(action, options = {}) {
   return `
     <article class="action-card${highlightedClass}" data-action-id="${escapeHtml(action.id)}">
       <h4>${escapeHtml(action.description)}</h4>
-      <p>${escapeHtml(notesLabel)}</p>
-      <div class="action-meta">
+      <p class="action-card-note">${escapeHtml(notesLabel)}</p>
+      <div class="action-meta action-card-row">
         <span>${escapeHtml(ownerLabel)}</span>
-        <span> · </span>
-        <span>${escapeHtml(action.status)}</span>
-        <span> · Due ${escapeHtml(dueDateLabel)}</span>
+        <span class="action-card-separator">·</span>
+        <span class="${statusClass}">${escapeHtml(statusLabel)}</span>
+        <span class="action-card-separator">·</span>
+        <span class="${dueDateClass}">Due ${escapeHtml(dueDateLabel)}</span>
       </div>
-      <p class="entity-meta">Customer: ${escapeHtml(action.customer || 'Unassigned')} · Partner: ${escapeHtml(action.partner || 'Unassigned')}</p>
-      <div class="action-meta">
+      <p class="entity-meta action-card-row">Customer: ${escapeHtml(action.customer || 'Unassigned')} <span class="action-card-separator">·</span> Partner: ${escapeHtml(action.partner || 'Unassigned')}</p>
+      <div class="action-meta action-card-row action-card-row--controls">
         <span>Source: ${escapeHtml(action.sourceMeetingTitle || 'Unknown meeting')}</span>
-        ${action.sourceMeetingId ? `<button class="secondary-button js-open-meeting" type="button" data-meeting-id="${escapeHtml(action.sourceMeetingId)}" ${returnSection ? `data-return-section="${escapeHtml(returnSection)}"` : ''}>Open source meeting</button>` : ''}
+        ${action.sourceMeetingId ? `<button class="secondary-button action-card-source-button js-open-meeting" type="button" data-meeting-id="${escapeHtml(action.sourceMeetingId)}" ${returnSection ? `data-return-section="${escapeHtml(returnSection)}"` : ''}>Open source meeting</button>` : ''}
       </div>
       ${editable ? `
         <div class="sort-controls">
@@ -3867,6 +4612,64 @@ function attachInteractions() {
     });
   }
 
+  const selectRestoreFileButton = document.querySelector('.js-select-restore-file');
+  const restoreBackupInput = document.getElementById('restore-backup-input');
+  const restoreBackupButton = document.querySelector('.js-restore-backup');
+  const exportBackupButton = document.querySelector('.js-export-backup');
+  const clearAllLocalDataButton = document.querySelector('.js-clear-all-local-data');
+  const emptyImportButtons = document.querySelectorAll('.js-go-import');
+
+  if (selectRestoreFileButton && restoreBackupInput) {
+    selectRestoreFileButton.addEventListener('click', () => {
+      restoreBackupInput.click();
+    });
+  }
+
+  if (restoreBackupInput) {
+    restoreBackupInput.addEventListener('change', (event) => {
+      const selectedFile = event.target.files && event.target.files[0] ? event.target.files[0] : null;
+      state.dataManagementSelectedBackupFile = selectedFile;
+      state.dataManagementSelectedBackupName = selectedFile ? selectedFile.name : '';
+      clearDataManagementMessages();
+      renderViews();
+      event.target.value = '';
+    });
+  }
+
+  if (restoreBackupButton) {
+    restoreBackupButton.addEventListener('click', () => {
+      handleRestoreBackup();
+    });
+  }
+
+  if (exportBackupButton) {
+    exportBackupButton.addEventListener('click', () => {
+      handleExportBackup();
+    });
+  }
+
+  if (clearAllLocalDataButton) {
+    clearAllLocalDataButton.addEventListener('click', () => {
+      handleClearAllLocalData();
+    });
+  }
+
+  emptyImportButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      state.activeSection = 'import';
+      state.selectedMeetingId = null;
+      state.meetingEditMode = false;
+      state.meetingEditDraft = null;
+      state.meetingEditError = '';
+      state.selectedCustomerKey = null;
+      state.selectedPartnerKey = null;
+      state.selectedParticipantKey = null;
+      state.meetingReturnContext = null;
+      state.activeViewerTab = 'overview';
+      renderViews();
+    });
+  });
+
   const topImportButton = document.querySelector('.topbar .primary-button');
   if (topImportButton) {
     topImportButton.addEventListener('click', () => {
@@ -3953,4 +4756,7 @@ function formatTabLabel(tab) {
   return labels[tab] || tab;
 }
 
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => {
+  setupLogoFallbacks();
+  bootstrapAuthentication();
+});

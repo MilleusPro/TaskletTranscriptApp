@@ -4,16 +4,45 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Tasklet Transcript App</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css">  
 </head>
 <body>
-  <div class="app">
+  <section id="auth-view" class="auth-shell" aria-live="polite">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <img class="auth-logo js-tasklet-logo" src="assets/tasklet-logo.png.png" alt="Tasklet">
+        <h1>Transcript Hub</h1>
+      </div>
+      <p class="auth-subtitle">Sign in with your Tasklet account to access meeting data.</p>
+
+      <p id="auth-status" class="auth-status" role="status">Checking session...</p>
+      <p id="auth-error" class="auth-error" role="alert" hidden></p>
+
+      <form id="login-form" class="auth-form">
+        <label class="auth-field-group" for="login-email">
+          <span>Email</span>
+          <input id="login-email" class="auth-field" type="email" autocomplete="email" required>
+        </label>
+        <label class="auth-field-group" for="login-password">
+          <span>Password</span>
+          <input id="login-password" class="auth-field" type="password" autocomplete="current-password" required>
+        </label>
+        <button id="sign-in-button" class="primary-button" type="submit">Sign In</button>
+      </form>
+    </div>
+  </section>
+
+  <div id="app-shell" class="app" hidden>
     <aside class="sidebar" aria-label="Primary navigation">
       <div class="brand">
-        <div class="brand-mark">T</div>
-        <div>
-          <h1>Transcript App</h1>
-          <p>Tasklet Factory</p>
+        <div class="brand-logo-wrap" aria-label="Tasklet" role="img">
+          <img class="brand-logo js-tasklet-logo" src="assets/tasklet-logo.svg" alt="Tasklet">
+          <span class="brand-logo-fallback" aria-hidden="true">T</span>
+        </div>
+        <div class="brand-text">
+          <h1>Tasklet</h1>
+          <p>Transcript Hub</p>
+          <span class="brand-fallback-text">Transcript App · Tasklet Factory</span>
         </div>
       </div>
 
@@ -24,11 +53,16 @@
         <button class="nav-button" type="button" data-section="partners">Partners</button>
         <button class="nav-button" type="button" data-section="participants">Participants</button>
         <button class="nav-button" type="button" data-section="actions">Actions</button>
+        <button class="nav-button" type="button" data-section="dataManagement">Data Management</button>
         <button class="nav-button" type="button" data-section="import">Import Transcript</button>
       </nav>
 
       <div class="sidebar-footer">
-        <p>Use test data only while the repository is public.</p>
+        <p class="sidebar-footer-note">Use test data only while the repository is public.</p>
+        <div class="auth-user-panel js-auth-user-panel" hidden>
+          <p class="auth-user-email js-auth-user-email"></p>
+          <button class="secondary-button secondary-button--inverse js-auth-sign-out" type="button">Sign Out</button>
+        </div>
       </div>
     </aside>
 
@@ -54,11 +88,14 @@
       <section id="partners-view" class="view-panel" hidden></section>
       <section id="participants-view" class="view-panel" hidden></section>
       <section id="actions-view" class="view-panel" hidden></section>
+      <section id="dataManagement-view" class="view-panel" hidden></section>
       <section id="import-view" class="view-panel" hidden></section>
     </main>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="supabase-config.js"></script>
   <script src="script.js"></script>
-</body>
+  </body>
 </html>
