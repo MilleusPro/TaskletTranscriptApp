@@ -521,6 +521,78 @@ button {
   margin: 0;
 }
 
+.viewer-extra-sections {
+  display: grid;
+  gap: 14px;
+}
+
+.viewer-extra-section {
+  display: grid;
+  gap: 8px;
+}
+
+.viewer-extra-section h5 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--main-text);
+}
+
+.viewer-list {
+  margin: 0;
+  padding-left: 18px;
+  color: #465165;
+}
+
+.viewer-transcript-list {
+  display: grid;
+  gap: 8px;
+}
+
+.viewer-transcript-line {
+  margin: 0;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  color: #465165;
+  line-height: 1.5;
+}
+
+.viewer-transcript-line:last-child {
+  border-bottom: 0;
+}
+
+.import-detected-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.import-detected-section {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #f5f8fd;
+  color: var(--secondary-text);
+}
+
+.import-detected-section.found {
+  border: 1px solid #d9e7ff;
+  background: #f2f8ff;
+}
+
+.import-detected-section.missing {
+  border: 1px solid #f0d8d8;
+  background: #fff7f7;
+}
+
+.import-detected-section strong {
+  color: var(--main-text);
+}
+
 .viewer-list {
   margin: 0;
   padding-left: 18px;
@@ -621,6 +693,83 @@ button {
   border-radius: 10px;
   background: #eefaf2;
   color: #16603d;
+}
+
+.import-preview-panel {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fbfcfe;
+}
+
+.import-preview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  color: var(--secondary-text);
+  font-size: 13px;
+}
+
+.import-preview-block {
+  display: grid;
+  gap: 6px;
+}
+
+.import-preview-block h5 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.import-preview-text,
+.import-preview-html {
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #dfe7f8;
+  border-radius: 8px;
+  background: white;
+  color: var(--main-text);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.parser-debug {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  background: #f8fbff;
+}
+
+.parser-debug summary {
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 10px;
+}
+
+.parser-debug-block {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.parser-debug-block h5 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.parser-debug-block ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--secondary-text);
+}
+
+.parser-debug-block li {
+  margin-bottom: 4px;
 }
 
 .import-review-panel {
