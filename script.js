@@ -191,6 +191,9 @@ const sampleData = {
 
 const MAX_IMPORT_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 const STORAGE_KEY = 'taskletTranscriptApp.meetings';
+const ACTION_OVERRIDES_STORAGE_KEY = 'taskletTranscriptApp.actionOverrides';
+const ACTION_STATUSES = ['Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled'];
+const ACTION_FILTERS = ['All', 'Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled', 'Overdue', 'No due date'];
 
 function createEmptyImportReview() {
   return {
@@ -844,6 +847,78 @@ function readStoredMeetings() {
   }
 }
 
+function sanitizeActionOverrideRecord(record) {
+  if (!record || typeof record !== 'object') {
+    return null;
+  }
+
+  const actionId = String(record.actionId || '').trim();
+  if (!actionId) {
+    return null;
+  }
+
+  const status = ACTION_STATUSES.includes(record.status) ? record.status : '';
+  const dueDate = normalizeExtractedDate(record.dueDate || '');
+
+  if (!status && !dueDate) {
+    return null;
+  }
+
+  return {
+    actionId,
+    status,
+    dueDate
+  };
+}
+
+function readStoredActionOverrides() {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return {};
+  }
+
+  try {
+    const rawValue = window.localStorage.getItem(ACTION_OVERRIDES_STORAGE_KEY);
+    if (!rawValue) {
+      return {};
+    }
+
+    const parsedValue = JSON.parse(rawValue);
+    const records = Array.isArray(parsedValue)
+      ? parsedValue
+      : Object.values(parsedValue || {});
+
+    return records.reduce((accumulator, record) => {
+      const sanitizedRecord = sanitizeActionOverrideRecord(record);
+      if (!sanitizedRecord) {
+        return accumulator;
+      }
+
+      accumulator[sanitizedRecord.actionId] = sanitizedRecord;
+      return accumulator;
+    }, {});
+  } catch (error) {
+    return {};
+  }
+}
+
+function writeStoredActionOverrides(overridesById) {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return false;
+  }
+
+  try {
+    const records = Object.values(overridesById || {})
+      .map((record) => sanitizeActionOverrideRecord(record))
+      .filter(Boolean)
+      .sort((first, second) => first.actionId.localeCompare(second.actionId));
+
+    window.localStorage.setItem(ACTION_OVERRIDES_STORAGE_KEY, JSON.stringify(records));
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
 function normalizeExtraSection(section) {
   if (!section || typeof section !== 'object') {
     return null;
@@ -989,6 +1064,8 @@ const state = {
   selectedPartnerKey: null,
   selectedParticipantKey: null,
   meetingReturnContext: null,
+  actionFilter: 'All',
+  actionOverrides: readStoredActionOverrides(),
   activeViewerTab: 'overview',
   sortOrder: 'newest',
   searchQuery: '',
@@ -1228,6 +1305,322 @@ function getMeetingOpenActionCount(meeting) {
   }
 
   return 0;
+}
+
+function getTodayDateString() {
+  const currentDate = new Date();
+  const year = currentDate.getFullYear();
+  const month = String(currentDate.getMonth() + 1).padStart(2, '0');
+  const day = String(currentDate.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function hashTextStable(value) {
+  let hash = 2166136261;
+  const text = String(value || '');
+
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
+  }
+
+  return (hash >>> 0).toString(16);
+}
+
+function getImportedActionId(meetingId, actionIndex, lineText) {
+  const payload = `${meetingId}|${actionIndex}|${normalizeCompanyName(lineText)}`;
+  return `imported-${meetingId}-${actionIndex}-${hashTextStable(payload)}`;
+}
+
+function isLikelyActionHeaderRow(lineText) {
+  const normalized = String(lineText || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalized) {
+    return false;
+  }
+
+  if (normalized === 'owner | action | notes' || normalized === 'owner | follow-up item | notes') {
+    return true;
+  }
+
+  const compact = normalized.replace(/\s+/g, '');
+  if (compact === 'owner|action|notes' || compact === 'owner|follow-upitem|notes') {
+    return true;
+  }
+
+  return false;
+}
+
+function looksLikeActionOwner(value) {
+  const normalized = normalizeCompanyName(value);
+  if (!normalized) {
+    return false;
+  }
+
+  const wordCount = normalized.split(' ').filter(Boolean).length;
+  if (!wordCount || wordCount > 6) {
+    return false;
+  }
+
+  return /[A-Za-z]/.test(normalized);
+}
+
+function parseImportedActionLine(lineText) {
+  const originalLine = normalizeCompanyName(lineText);
+  if (!originalLine || isLikelyActionHeaderRow(originalLine)) {
+    return null;
+  }
+
+  if (originalLine.includes('|')) {
+    const parts = originalLine.split('|').map((part) => normalizeCompanyName(part));
+    const [ownerPart = '', actionPart = '', ...noteParts] = parts;
+    const notesPart = normalizeCompanyName(noteParts.join(' | '));
+
+    const possibleHeader = [ownerPart, actionPart, notesPart]
+      .join(' | ')
+      .toLowerCase();
+    if (possibleHeader.includes('owner') && (possibleHeader.includes('action') || possibleHeader.includes('follow-up item')) && possibleHeader.includes('notes')) {
+      return null;
+    }
+
+    if (actionPart) {
+      return {
+        owner: looksLikeActionOwner(ownerPart) ? ownerPart : '',
+        description: actionPart,
+        notes: notesPart
+      };
+    }
+  }
+
+  const colonMatch = originalLine.match(/^([^:]{2,80})\s*:\s*(.+)$/);
+  if (colonMatch && looksLikeActionOwner(colonMatch[1])) {
+    return {
+      owner: normalizeCompanyName(colonMatch[1]),
+      description: normalizeCompanyName(colonMatch[2]),
+      notes: ''
+    };
+  }
+
+  const dashMatch = originalLine.match(/^([^\-\u2013\u2014]{2,80})\s*[\-\u2013\u2014]\s+(.+)$/);
+  if (dashMatch && looksLikeActionOwner(dashMatch[1])) {
+    return {
+      owner: normalizeCompanyName(dashMatch[1]),
+      description: normalizeCompanyName(dashMatch[2]),
+      notes: ''
+    };
+  }
+
+  return {
+    owner: '',
+    description: originalLine,
+    notes: ''
+  };
+}
+
+function getImportedActionLinesFromMeeting(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return [];
+  }
+
+  if (Array.isArray(meeting.actions)) {
+    return meeting.actions
+      .filter((line) => typeof line === 'string')
+      .flatMap((line) => String(line).split(/\r?\n/))
+      .map((line) => normalizeCompanyName(line))
+      .filter(Boolean);
+  }
+
+  if (typeof meeting.actions === 'string') {
+    return meeting.actions
+      .split(/\r?\n/)
+      .map((line) => normalizeCompanyName(line))
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function getActionOverride(actionId) {
+  return state.actionOverrides[actionId] || null;
+}
+
+function getEffectiveActionStatus(defaultStatus, override) {
+  if (override && ACTION_STATUSES.includes(override.status)) {
+    return override.status;
+  }
+
+  return ACTION_STATUSES.includes(defaultStatus) ? defaultStatus : 'Open';
+}
+
+function getEffectiveActionDueDate(defaultDueDate, override) {
+  if (override && typeof override.dueDate === 'string') {
+    return normalizeExtractedDate(override.dueDate || '');
+  }
+
+  return normalizeExtractedDate(defaultDueDate || '');
+}
+
+function getCombinedActions() {
+  const actions = [];
+
+  sampleData.actions.forEach((action) => {
+    const sourceMeeting = getMeetingById(action.sourceMeetingId);
+    const override = getActionOverride(action.id);
+
+    actions.push({
+      id: action.id,
+      description: normalizeCompanyName(action.description),
+      owner: normalizeCompanyName(action.owner),
+      notes: normalizeCompanyName(action.notes),
+      status: getEffectiveActionStatus(action.status, override),
+      dueDate: getEffectiveActionDueDate(action.dueDate, override),
+      sourceMeetingId: action.sourceMeetingId,
+      sourceMeetingTitle: sourceMeeting ? sourceMeeting.title : 'Unknown meeting',
+      customer: sourceMeeting ? getMeetingDisplayCustomer(sourceMeeting) : 'Unassigned',
+      partner: sourceMeeting ? getMeetingDisplayPartner(sourceMeeting) : 'Unassigned',
+      sourceType: 'structured'
+    });
+  });
+
+  getAllMeetings().forEach((meeting) => {
+    const importedLines = getImportedActionLinesFromMeeting(meeting);
+
+    importedLines.forEach((line, lineIndex) => {
+      const parsedLine = parseImportedActionLine(line);
+      if (!parsedLine || !parsedLine.description) {
+        return;
+      }
+
+      const actionId = getImportedActionId(meeting.id, lineIndex, line);
+      const override = getActionOverride(actionId);
+
+      actions.push({
+        id: actionId,
+        description: parsedLine.description,
+        owner: parsedLine.owner,
+        notes: parsedLine.notes,
+        status: getEffectiveActionStatus('Open', override),
+        dueDate: getEffectiveActionDueDate('', override),
+        sourceMeetingId: meeting.id,
+        sourceMeetingTitle: meeting.title || 'Imported meeting',
+        customer: getMeetingDisplayCustomer(meeting),
+        partner: getMeetingDisplayPartner(meeting),
+        sourceType: 'imported'
+      });
+    });
+  });
+
+  return actions;
+}
+
+function isActionClosed(action) {
+  return action.status === 'Completed' || action.status === 'Cancelled';
+}
+
+function isActionOverdue(action) {
+  if (!action || !action.dueDate || isActionClosed(action)) {
+    return false;
+  }
+
+  return action.dueDate < getTodayDateString();
+}
+
+function getActionSortGroup(action) {
+  if (isActionClosed(action)) {
+    return 3;
+  }
+
+  if (isActionOverdue(action)) {
+    return 0;
+  }
+
+  if (action.dueDate) {
+    return 1;
+  }
+
+  return 2;
+}
+
+function sortCombinedActions(actions) {
+  return [...actions].sort((first, second) => {
+    const firstGroup = getActionSortGroup(first);
+    const secondGroup = getActionSortGroup(second);
+    if (firstGroup !== secondGroup) {
+      return firstGroup - secondGroup;
+    }
+
+    if (first.dueDate && second.dueDate) {
+      if (first.dueDate !== second.dueDate) {
+        return first.dueDate.localeCompare(second.dueDate);
+      }
+    }
+
+    if (first.status !== second.status) {
+      return ACTION_STATUSES.indexOf(first.status) - ACTION_STATUSES.indexOf(second.status);
+    }
+
+    if (first.sourceMeetingTitle !== second.sourceMeetingTitle) {
+      return first.sourceMeetingTitle.localeCompare(second.sourceMeetingTitle);
+    }
+
+    return first.description.localeCompare(second.description);
+  });
+}
+
+function filterCombinedActions(actions, selectedFilter) {
+  if (!selectedFilter || selectedFilter === 'All') {
+    return actions;
+  }
+
+  if (selectedFilter === 'Overdue') {
+    return actions.filter((action) => isActionOverdue(action));
+  }
+
+  if (selectedFilter === 'No due date') {
+    return actions.filter((action) => !action.dueDate);
+  }
+
+  return actions.filter((action) => action.status === selectedFilter);
+}
+
+function updateActionOverride(actionId, update) {
+  if (!actionId) {
+    return;
+  }
+
+  const currentOverride = state.actionOverrides[actionId] || { actionId, status: '', dueDate: '' };
+  const nextOverride = {
+    actionId,
+    status: currentOverride.status || '',
+    dueDate: currentOverride.dueDate || ''
+  };
+
+  if (Object.prototype.hasOwnProperty.call(update, 'status')) {
+    nextOverride.status = ACTION_STATUSES.includes(update.status) ? update.status : '';
+  }
+
+  if (Object.prototype.hasOwnProperty.call(update, 'dueDate')) {
+    nextOverride.dueDate = normalizeExtractedDate(update.dueDate || '');
+  }
+
+  const shouldDelete = !nextOverride.status && !nextOverride.dueDate;
+  const nextOverrides = { ...state.actionOverrides };
+  if (shouldDelete) {
+    delete nextOverrides[actionId];
+  } else {
+    nextOverrides[actionId] = nextOverride;
+  }
+
+  const stored = writeStoredActionOverrides(nextOverrides);
+  if (!stored) {
+    return;
+  }
+
+  state.actionOverrides = nextOverrides;
+  renderViews();
 }
 
 function splitParticipantEntries(value) {
@@ -1564,9 +1957,10 @@ function renderDashboard(meetings) {
   const totalMeetings = getAllMeetings().length;
   const totalCustomers = getCustomersFromMeetings().length;
   const totalPartners = getPartnersFromMeetings().length;
-  const openActions = sampleData.actions.filter((action) => action.status !== 'Completed' && action.status !== 'Cancelled').length;
+  const combinedActions = sortCombinedActions(getCombinedActions());
+  const openActions = combinedActions.filter((action) => !isActionClosed(action)).length;
   const recentMeetings = meetings.slice(0, 3);
-  const followUps = sampleData.actions.slice(0, 3);
+  const followUps = combinedActions.filter((action) => !isActionClosed(action)).slice(0, 3);
 
   return `
     <section class="hero-panel">
@@ -1611,7 +2005,7 @@ function renderDashboard(meetings) {
           <h3>Open Follow-ups</h3>
         </div>
         <div class="action-list">
-          ${followUps.length ? followUps.map((action) => renderActionCard(action)).join('') : '<div class="empty-state">No follow-ups available.</div>'}
+          ${followUps.length ? followUps.map((action) => renderActionCard(action, { editable: false })).join('') : '<div class="empty-state">No follow-ups available.</div>'}
         </div>
       </div>
     </section>
@@ -2171,12 +2565,28 @@ function renderParticipants() {
 }
 
 function renderActions() {
-  const list = sampleData.actions.map((action) => renderActionCard(action)).join('');
+  const combinedActions = sortCombinedActions(getCombinedActions());
+  const selectedFilter = ACTION_FILTERS.includes(state.actionFilter) ? state.actionFilter : 'All';
+  const visibleActions = filterCombinedActions(combinedActions, selectedFilter);
+  const list = visibleActions.length
+    ? visibleActions.map((action) => renderActionCard(action, { editable: true, returnSection: 'actions' })).join('')
+    : '<div class="empty-state">No actions match the selected filter.</div>';
+
+  const filterOptions = ACTION_FILTERS.map((filter) => `
+    <option value="${escapeHtml(filter)}" ${filter === selectedFilter ? 'selected' : ''}>${escapeHtml(filter)}</option>
+  `).join('');
 
   return `
     <section class="panel-card">
       <div class="section-heading">
-        <h3>Actions</h3>
+        <div>
+          <h3>Actions</h3>
+          <p class="entity-meta">${visibleActions.length} of ${combinedActions.length} actions shown</p>
+        </div>
+        <div class="sort-controls">
+          <label class="sort-label" for="actions-filter">Filter</label>
+          <select id="actions-filter" class="sort-select js-actions-filter">${filterOptions}</select>
+        </div>
       </div>
       <div class="action-list">${list}</div>
     </section>
@@ -2366,7 +2776,8 @@ function renderImport() {
 function renderMeetingCard(meeting) {
   const customer = getCustomerById(meeting.customerId);
   const partner = getPartnerById(meeting.partnerId);
-  const participantNames = meeting.participantIds.map((id) => getParticipantById(id)).filter(Boolean).map((participant) => participant.name).join(', ');
+  const participantIds = Array.isArray(meeting.participantIds) ? meeting.participantIds : [];
+  const participantNames = participantIds.map((id) => getParticipantById(id)).filter(Boolean).map((participant) => participant.name).join(', ');
   const statusClass = meeting.title.includes('Alteco') ? 'meeting-status' : 'meeting-status completed';
 
   return `
@@ -2378,7 +2789,7 @@ function renderMeetingCard(meeting) {
             ${customer ? `<span class="tag customer-tag">Customer: ${customer.name}</span>` : ''}
           </div>
           <h4>${meeting.title}</h4>
-          <p class="meeting-meta">${formatDate(meeting.date)} · ${meeting.durationMinutes} minutes · ${meeting.participantIds.length} participants</p>
+          <p class="meeting-meta">${formatDate(meeting.date)} · ${meeting.durationMinutes} minutes · ${participantIds.length} participants</p>
         </div>
         <span class="${statusClass}">${meeting.title.includes('Alteco') ? 'Follow-up needed' : 'Completed'}</span>
       </div>
@@ -2392,20 +2803,39 @@ function renderMeetingCard(meeting) {
   `;
 }
 
-function renderActionCard(action) {
-  const meeting = sampleData.meetings.find((entry) => entry.id === action.sourceMeetingId);
+function renderActionCard(action, options = {}) {
+  const editable = Boolean(options.editable);
+  const returnSection = options.returnSection ? String(options.returnSection) : '';
+  const ownerLabel = action.owner || 'Unassigned';
+  const notesLabel = action.notes || 'No notes';
+  const dueDateLabel = action.dueDate ? formatDate(action.dueDate) : 'No due date';
+  const statusOptions = ACTION_STATUSES.map((status) => `
+    <option value="${escapeHtml(status)}" ${status === action.status ? 'selected' : ''}>${escapeHtml(status)}</option>
+  `).join('');
 
   return `
     <article class="action-card">
-      <h4>${action.description}</h4>
-      <p>${action.notes}</p>
+      <h4>${escapeHtml(action.description)}</h4>
+      <p>${escapeHtml(notesLabel)}</p>
       <div class="action-meta">
-        <span>${action.owner}</span>
+        <span>${escapeHtml(ownerLabel)}</span>
         <span> · </span>
-        <span>${action.status}</span>
-        <span> · Due ${formatDate(action.dueDate)}</span>
+        <span>${escapeHtml(action.status)}</span>
+        <span> · Due ${escapeHtml(dueDateLabel)}</span>
       </div>
-      <p class="entity-meta">Source: ${meeting ? meeting.title : 'Unknown meeting'}</p>
+      <p class="entity-meta">Customer: ${escapeHtml(action.customer || 'Unassigned')} · Partner: ${escapeHtml(action.partner || 'Unassigned')}</p>
+      <div class="action-meta">
+        <span>Source: ${escapeHtml(action.sourceMeetingTitle || 'Unknown meeting')}</span>
+        ${action.sourceMeetingId ? `<button class="secondary-button js-open-meeting" type="button" data-meeting-id="${escapeHtml(action.sourceMeetingId)}" ${returnSection ? `data-return-section="${escapeHtml(returnSection)}"` : ''}>Open source meeting</button>` : ''}
+      </div>
+      ${editable ? `
+        <div class="sort-controls">
+          <label class="sort-label" for="action-status-${escapeHtml(action.id)}">Status</label>
+          <select id="action-status-${escapeHtml(action.id)}" class="sort-select js-action-status" data-action-id="${escapeHtml(action.id)}">${statusOptions}</select>
+          <label class="sort-label" for="action-due-${escapeHtml(action.id)}">Due date</label>
+          <input id="action-due-${escapeHtml(action.id)}" class="sort-select js-action-due-date" data-action-id="${escapeHtml(action.id)}" type="date" value="${escapeHtml(action.dueDate || '')}">
+        </div>
+      ` : ''}
     </article>
   `;
 }
@@ -2588,8 +3018,8 @@ function attachInteractions() {
       const returnSection = button.dataset.returnSection;
       const returnKey = button.dataset.returnKey;
 
-      state.meetingReturnContext = (returnSection && returnKey)
-        ? { section: returnSection, key: returnKey }
+      state.meetingReturnContext = returnSection
+        ? { section: returnSection, key: returnKey || null }
         : null;
       state.activeSection = 'meetings';
       state.selectedMeetingId = button.dataset.meetingId;
@@ -2615,6 +3045,11 @@ function attachInteractions() {
         state.selectedParticipantKey = state.meetingReturnContext.key;
         state.selectedCustomerKey = null;
         state.selectedPartnerKey = null;
+      } else if (state.meetingReturnContext && state.meetingReturnContext.section === 'actions') {
+        state.activeSection = 'actions';
+        state.selectedCustomerKey = null;
+        state.selectedPartnerKey = null;
+        state.selectedParticipantKey = null;
       }
 
       state.selectedMeetingId = null;
@@ -2648,6 +3083,38 @@ function attachInteractions() {
     button.addEventListener('click', () => {
       state.activeViewerTab = button.dataset.viewerTab;
       renderViews();
+    });
+  });
+
+  const actionsFilter = document.querySelector('.js-actions-filter');
+  if (actionsFilter) {
+    actionsFilter.value = state.actionFilter;
+    actionsFilter.addEventListener('change', (event) => {
+      const selectedFilter = ACTION_FILTERS.includes(event.target.value) ? event.target.value : 'All';
+      state.actionFilter = selectedFilter;
+      renderViews();
+    });
+  }
+
+  document.querySelectorAll('.js-action-status').forEach((field) => {
+    field.addEventListener('change', () => {
+      const actionId = field.dataset.actionId;
+      if (!actionId) {
+        return;
+      }
+
+      updateActionOverride(actionId, { status: field.value });
+    });
+  });
+
+  document.querySelectorAll('.js-action-due-date').forEach((field) => {
+    field.addEventListener('change', () => {
+      const actionId = field.dataset.actionId;
+      if (!actionId) {
+        return;
+      }
+
+      updateActionOverride(actionId, { dueDate: field.value });
     });
   });
 
