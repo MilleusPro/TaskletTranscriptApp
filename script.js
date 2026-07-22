@@ -932,16 +932,9 @@ function getMeetingDisplayPartner(meeting) {
 }
 
 function getMeetingDisplayParticipants(meeting) {
-  if (Array.isArray(meeting.participants) && meeting.participants.length) {
-    return meeting.participants.join(', ');
-  }
-
-  if (Array.isArray(meeting.participantIds) && meeting.participantIds.length) {
-    return meeting.participantIds
-      .map((id) => getParticipantById(id))
-      .filter(Boolean)
-      .map((participant) => participant.name)
-      .join(', ');
+  const parsedParticipants = extractParticipantRecordsFromMeeting(meeting);
+  if (parsedParticipants.length) {
+    return parsedParticipants.map((participant) => participant.name).join(', ');
   }
 
   return 'No participants listed';
@@ -994,6 +987,7 @@ const state = {
   selectedMeetingId: null,
   selectedCustomerKey: null,
   selectedPartnerKey: null,
+  selectedParticipantKey: null,
   meetingReturnContext: null,
   activeViewerTab: 'overview',
   sortOrder: 'newest',
@@ -1039,6 +1033,7 @@ function init() {
       state.selectedMeetingId = null;
       state.selectedCustomerKey = null;
       state.selectedPartnerKey = null;
+      state.selectedParticipantKey = null;
       state.meetingReturnContext = null;
       state.activeViewerTab = 'overview';
       renderViews();
@@ -1233,6 +1228,266 @@ function getMeetingOpenActionCount(meeting) {
   }
 
   return 0;
+}
+
+function splitParticipantEntries(value) {
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry) => typeof entry === 'string')
+      .flatMap((entry) => splitParticipantEntries(entry));
+  }
+
+  if (typeof value !== 'string') {
+    return [];
+  }
+
+  return value
+    .split(/[\n,;]+/)
+    .map((entry) => normalizeCompanyName(entry))
+    .filter(Boolean);
+}
+
+function looksLikePersonName(value) {
+  const normalized = normalizeCompanyName(value);
+  if (!normalized) {
+    return false;
+  }
+
+  if (normalized.length < 2 || normalized.length > 80) {
+    return false;
+  }
+
+  const words = normalized.split(' ').filter(Boolean);
+  if (!words.length || words.length > 8) {
+    return false;
+  }
+
+  return /[A-Za-z]/.test(normalized);
+}
+
+function looksLikeCompanyValue(value) {
+  const normalized = normalizeCompanyName(value);
+  if (!normalized) {
+    return false;
+  }
+
+  const words = normalized.split(' ').filter(Boolean);
+  if (!words.length || words.length > 6) {
+    return false;
+  }
+
+  if (!/[A-Za-z]/.test(normalized)) {
+    return false;
+  }
+
+  const companyHints = /(tasklet|solutions?|consult|partner|it|geo|group|aps|a\/s|ab|as|inc|llc|ltd|gmbh|corp|company)/i;
+  if (companyHints.test(normalized)) {
+    return true;
+  }
+
+  return words.length <= 3;
+}
+
+function parseParticipantEntry(rawEntry) {
+  const originalEntry = normalizeCompanyName(rawEntry);
+  if (!originalEntry) {
+    return null;
+  }
+
+  const slashParts = originalEntry
+    .split('/')
+    .map((part) => normalizeCompanyName(part))
+    .filter(Boolean);
+
+  if (slashParts.length === 2) {
+    const [nameCandidate, companyCandidate] = slashParts;
+    if (looksLikePersonName(nameCandidate) && looksLikeCompanyValue(companyCandidate)) {
+      return {
+        name: nameCandidate,
+        company: companyCandidate,
+        originalEntry
+      };
+    }
+  }
+
+  return {
+    name: originalEntry,
+    company: '',
+    originalEntry
+  };
+}
+
+function extractParticipantRecordsFromMeeting(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return [];
+  }
+
+  const records = [];
+
+  if (Array.isArray(meeting.participantIds)) {
+    meeting.participantIds.forEach((participantId) => {
+      const participant = getParticipantById(participantId);
+      if (!participant || !participant.name) {
+        return;
+      }
+
+      records.push({
+        name: normalizeCompanyName(participant.name),
+        company: normalizeCompanyName(participant.company),
+        originalEntry: normalizeCompanyName(participant.name)
+      });
+    });
+  }
+
+  splitParticipantEntries(meeting.participants).forEach((entry) => {
+    const parsedEntry = parseParticipantEntry(entry);
+    if (parsedEntry && parsedEntry.name) {
+      records.push(parsedEntry);
+    }
+  });
+
+  const uniqueByName = new Map();
+  records.forEach((record) => {
+    const groupingKey = getNameGroupingKey(record.name);
+    if (!groupingKey) {
+      return;
+    }
+
+    const existingRecord = uniqueByName.get(groupingKey);
+    if (!existingRecord) {
+      uniqueByName.set(groupingKey, { ...record });
+      return;
+    }
+
+    if (!existingRecord.company && record.company) {
+      existingRecord.company = record.company;
+    }
+  });
+
+  return Array.from(uniqueByName.values());
+}
+
+function getMeetingStructuredActions(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return [];
+  }
+
+  if (Array.isArray(meeting.actionItemIds) && meeting.actionItemIds.length) {
+    return meeting.actionItemIds
+      .map((actionId) => sampleData.actions.find((entry) => entry.id === actionId))
+      .filter(Boolean);
+  }
+
+  return sampleData.actions.filter((action) => action.sourceMeetingId === meeting.id);
+}
+
+function isActionLineAssignedToParticipant(actionLine, participantName) {
+  if (typeof actionLine !== 'string' || typeof participantName !== 'string') {
+    return false;
+  }
+
+  const normalizedLine = actionLine.trim();
+  const normalizedName = normalizeCompanyName(participantName);
+  if (!normalizedLine || !normalizedName) {
+    return false;
+  }
+
+  const escapedName = normalizedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const ownerPattern = new RegExp(`^\\s*(?:[-*]\\s*)?${escapedName}\\s*[:\\-\\u2013\\u2014]\\s+`, 'i');
+  return ownerPattern.test(normalizedLine);
+}
+
+function getParticipantOpenActionCountForMeeting(meeting, participantName) {
+  if (!meeting || typeof meeting !== 'object') {
+    return 0;
+  }
+
+  const normalizedParticipantName = getNameGroupingKey(participantName);
+  if (!normalizedParticipantName) {
+    return 0;
+  }
+
+  const structuredActions = getMeetingStructuredActions(meeting);
+  if (structuredActions.length) {
+    return structuredActions.filter((action) => {
+      if (!action || action.status === 'Completed' || action.status === 'Cancelled') {
+        return false;
+      }
+
+      return getNameGroupingKey(action.owner) === normalizedParticipantName;
+    }).length;
+  }
+
+  if (!Array.isArray(meeting.actions)) {
+    return 0;
+  }
+
+  return meeting.actions.filter((actionLine) => isActionLineAssignedToParticipant(actionLine, participantName)).length;
+}
+
+function getParticipantsFromMeetings() {
+  const groupsByKey = new Map();
+
+  getAllMeetings().forEach((meeting) => {
+    const meetingParticipants = extractParticipantRecordsFromMeeting(meeting);
+
+    meetingParticipants.forEach((participantRecord) => {
+      const groupingKey = getNameGroupingKey(participantRecord.name);
+      if (!groupingKey) {
+        return;
+      }
+
+      if (!groupsByKey.has(groupingKey)) {
+        groupsByKey.set(groupingKey, {
+          key: groupingKey,
+          name: participantRecord.name,
+          companies: new Set(),
+          originalEntries: new Set(),
+          meetings: [],
+          meetingIds: new Set(),
+          openActions: 0
+        });
+      }
+
+      const group = groupsByKey.get(groupingKey);
+      if (participantRecord.company) {
+        group.companies.add(participantRecord.company);
+      }
+      if (participantRecord.originalEntry) {
+        group.originalEntries.add(participantRecord.originalEntry);
+      }
+
+      if (group.meetingIds.has(meeting.id)) {
+        return;
+      }
+
+      group.meetingIds.add(meeting.id);
+      group.meetings.push(meeting);
+      group.openActions += getParticipantOpenActionCountForMeeting(meeting, participantRecord.name);
+    });
+  });
+
+  return Array.from(groupsByKey.values())
+    .map((group) => {
+      const sortedMeetings = [...group.meetings].sort(compareMeetingsNewestFirst);
+      const companies = Array.from(group.companies).sort((a, b) => a.localeCompare(b));
+      const fallbackEntry = Array.from(group.originalEntries).find(Boolean) || group.name;
+
+      return {
+        key: group.key,
+        name: group.name,
+        companies,
+        fallbackEntry,
+        meetings: sortedMeetings,
+        latestMeetingDate: sortedMeetings.length && sortedMeetings[0].date ? sortedMeetings[0].date : '',
+        openActions: group.openActions
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function getParticipantGroupByKey(groupKey) {
+  return getParticipantsFromMeetings().find((group) => group.key === groupKey) || null;
 }
 
 function buildEntityGroupsFromMeetings(entityType) {
@@ -1826,18 +2081,84 @@ function renderPartners() {
 }
 
 function renderParticipants() {
-  const list = sampleData.participants.map((participant) => {
+  const participantGroups = getParticipantsFromMeetings();
+
+  if (state.selectedParticipantKey) {
+    const selectedParticipant = getParticipantGroupByKey(state.selectedParticipantKey);
+    if (!selectedParticipant) {
+      state.selectedParticipantKey = null;
+      return renderParticipants();
+    }
+
+    const companyLabel = selectedParticipant.companies.length
+      ? selectedParticipant.companies.join(', ')
+      : `Not confirmed (source: ${selectedParticipant.fallbackEntry})`;
+    const latestMeetingDate = selectedParticipant.latestMeetingDate ? formatDate(selectedParticipant.latestMeetingDate) : 'Date not available';
+    const historyList = selectedParticipant.meetings.length
+      ? selectedParticipant.meetings.map((meeting) => renderMeetingListItem(meeting, {
+        returnSection: 'participants',
+        returnKey: selectedParticipant.key
+      })).join('')
+      : '<div class="empty-state">No meetings available for this participant yet.</div>';
+
     return `
-      <article class="entity-card">
-        <h4>${participant.name}</h4>
-        <p>${participant.role} · ${participant.company}</p>
-        <div class="entity-meta">
-          <span class="badge">${participant.meetings.length} meetings</span>
-          <span>${participant.email}</span>
+      <section class="panel-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Participant detail</p>
+            <h3>${escapeHtml(selectedParticipant.name)}</h3>
+          </div>
+          <button class="secondary-button js-back-to-participants" type="button">← Return to participants</button>
         </div>
-      </article>
+        <div class="viewer-meta-grid">
+          <div>
+            <strong>Company / companies</strong>
+            <span>${escapeHtml(companyLabel)}</span>
+          </div>
+          <div>
+            <strong>Total meetings attended</strong>
+            <span>${selectedParticipant.meetings.length}</span>
+          </div>
+          <div>
+            <strong>Latest meeting date</strong>
+            <span>${latestMeetingDate}</span>
+          </div>
+          <div>
+            <strong>Open actions assigned</strong>
+            <span>${selectedParticipant.openActions}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel-card">
+        <div class="section-heading">
+          <h3>Meeting History</h3>
+        </div>
+        <div class="meeting-list">${historyList}</div>
+      </section>
     `;
-  }).join('');
+  }
+
+  const list = participantGroups.length
+    ? participantGroups.map((participant) => {
+      const companyLabel = participant.companies.length ? participant.companies.join(', ') : 'Company not confirmed';
+      const latestMeetingDate = participant.latestMeetingDate ? formatDate(participant.latestMeetingDate) : 'Date not available';
+
+      return `
+        <button class="entity-card meeting-card--selectable js-open-participant-detail" type="button" data-participant-key="${escapeHtml(participant.key)}">
+          <h4>${escapeHtml(participant.name)}</h4>
+          <p>${escapeHtml(companyLabel)}</p>
+          <div class="entity-meta">
+            <span class="badge">${participant.meetings.length} meetings</span>
+            <span>Latest: ${escapeHtml(latestMeetingDate)}</span>
+          </div>
+          <div class="entity-meta">
+            <span>Open actions: ${participant.openActions}</span>
+          </div>
+        </button>
+      `;
+    }).join('')
+    : '<div class="empty-state">No participant names were found in the available meetings.</div>';
 
   return `
     <section class="panel-card">
@@ -2243,6 +2564,19 @@ function attachInteractions() {
       state.activeSection = 'partners';
       state.selectedPartnerKey = button.dataset.partnerKey || null;
       state.selectedCustomerKey = null;
+      state.selectedParticipantKey = null;
+      state.selectedMeetingId = null;
+      state.meetingReturnContext = null;
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-open-participant-detail').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.activeSection = 'participants';
+      state.selectedParticipantKey = button.dataset.participantKey || null;
+      state.selectedCustomerKey = null;
+      state.selectedPartnerKey = null;
       state.selectedMeetingId = null;
       state.meetingReturnContext = null;
       renderViews();
@@ -2270,10 +2604,17 @@ function attachInteractions() {
         state.activeSection = 'customers';
         state.selectedCustomerKey = state.meetingReturnContext.key;
         state.selectedPartnerKey = null;
+        state.selectedParticipantKey = null;
       } else if (state.meetingReturnContext && state.meetingReturnContext.section === 'partners') {
         state.activeSection = 'partners';
         state.selectedPartnerKey = state.meetingReturnContext.key;
         state.selectedCustomerKey = null;
+        state.selectedParticipantKey = null;
+      } else if (state.meetingReturnContext && state.meetingReturnContext.section === 'participants') {
+        state.activeSection = 'participants';
+        state.selectedParticipantKey = state.meetingReturnContext.key;
+        state.selectedCustomerKey = null;
+        state.selectedPartnerKey = null;
       }
 
       state.selectedMeetingId = null;
@@ -2292,6 +2633,13 @@ function attachInteractions() {
   document.querySelectorAll('.js-back-to-partners').forEach((button) => {
     button.addEventListener('click', () => {
       state.selectedPartnerKey = null;
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-back-to-participants').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.selectedParticipantKey = null;
       renderViews();
     });
   });
@@ -2378,6 +2726,7 @@ function attachInteractions() {
       state.selectedMeetingId = null;
       state.selectedCustomerKey = null;
       state.selectedPartnerKey = null;
+      state.selectedParticipantKey = null;
       state.meetingReturnContext = null;
       state.activeViewerTab = 'overview';
       renderViews();
@@ -2414,11 +2763,23 @@ function getPageTitle() {
     return 'Partner Details';
   }
 
+  if (state.activeSection === 'participants' && state.selectedParticipantKey) {
+    return 'Participant Details';
+  }
+
   return sectionTitles[state.activeSection] || 'Dashboard';
 }
 
 function formatDate(dateString) {
+  if (!dateString) {
+    return 'Date not available';
+  }
+
   const date = new Date(`${dateString}T00:00:00`);
+  if (!Number.isFinite(date.getTime())) {
+    return 'Date not available';
+  }
+
   return date.toLocaleDateString('en', {
     day: 'numeric',
     month: 'short',
