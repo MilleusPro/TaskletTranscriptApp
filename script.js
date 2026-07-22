@@ -1,192 +1,9 @@
 const sampleData = {
-  meetings: [
-    {
-      id: 'meeting-alteco-001',
-      title: 'Alteco - Tasklet Demo',
-      date: '2026-06-16',
-      startTime: '07:30',
-      durationMinutes: 61,
-      meetingType: 'Demo',
-      customerId: 'customer-alteco',
-      partnerId: 'partner-axel',
-      participantIds: [
-        'participant-francesco',
-        'participant-marco',
-        'participant-massimo',
-        'participant-niels'
-      ],
-      subject: 'Tasklet Mobile WMS demo for Alteco',
-      tags: ['Mobile WMS', 'Business Central', 'On-premises', 'Manufacturing', 'Labels'],
-      summary: [
-        'Reviewed the warehouse flow for the pilot site and aligned on the next demo steps.',
-        'Confirmed that an on-premises deployment remains a requirement for the first release.'
-      ],
-      decisions: [
-        'Use Business Central as the master for inventory and labels.',
-        'Prioritise the manufacturing warehouse for the pilot.'
-      ],
-      openQuestions: ['Which label format will be used for pallet and carton labels?'],
-      commercialNotes: ['The customer requested a separate implementation estimate for the pilot phase.'],
-      actionItemIds: ['action-1', 'action-2'],
-      transcript: 'The meeting opened with a review of the pilot scope ...',
-      createdAt: '2026-07-21T10:00:00.000Z',
-      updatedAt: '2026-07-21T10:00:00.000Z'
-    },
-    {
-      id: 'meeting-northstar-002',
-      title: 'Northstar onboarding workshop',
-      date: '2026-06-24',
-      startTime: '09:00',
-      durationMinutes: 45,
-      meetingType: 'Workshop',
-      customerId: 'customer-alteco',
-      partnerId: 'partner-axel',
-      participantIds: ['participant-francesco', 'participant-niels', 'participant-massimo'],
-      subject: 'Prepare onboarding expectations for the implementation team',
-      tags: ['Onboarding', 'Project setup', 'Roles'],
-      summary: ['Reviewed the onboarding plan and aligned team responsibilities for the implementation period.'],
-      decisions: ['Create a shared project plan for the first four weeks.'],
-      openQuestions: ['Which internal approver should sign off on the final timeline?'],
-      commercialNotes: ['The partner requested a clarified statement of work before the next call.'],
-      actionItemIds: ['action-3'],
-      transcript: 'The team reviewed the current onboarding material and assigned owners for each workstream.',
-      createdAt: '2026-07-21T11:00:00.000Z',
-      updatedAt: '2026-07-21T11:00:00.000Z'
-    },
-    {
-      id: 'meeting-greenfield-003',
-      title: 'Greenfield discovery session',
-      date: '2026-05-14',
-      startTime: '14:00',
-      durationMinutes: 30,
-      meetingType: 'Discovery',
-      customerId: 'customer-greenfield',
-      partnerId: 'partner-summit',
-      participantIds: ['participant-marco', 'participant-francesco'],
-      subject: 'Discuss the current warehouse process and urgent improvements',
-      tags: ['Discovery', 'Warehouse', 'Barcode scanning'],
-      summary: ['Captured the current manual processes and the priorities for the initial discovery phase.'],
-      decisions: ['Focus the first review on barcode scanning and inventory visibility.'],
-      openQuestions: ['What is the expected timeline for a pilot environment?'],
-      commercialNotes: ['No commercial commitments were made during the discovery call.'],
-      actionItemIds: ['action-4'],
-      transcript: 'The discovery meeting focused on the existing workflow, current pain points, and how a future pilot could be structured.',
-      createdAt: '2026-07-21T12:00:00.000Z',
-      updatedAt: '2026-07-21T12:00:00.000Z'
-    }
-  ],
-  customers: [
-    {
-      id: 'customer-alteco',
-      name: 'Alteco',
-      country: 'Sweden',
-      partnerId: 'partner-axel',
-      meetings: ['meeting-alteco-001', 'meeting-northstar-002'],
-      openActionCount: 2
-    },
-    {
-      id: 'customer-greenfield',
-      name: 'Greenfield Foods',
-      country: 'Norway',
-      partnerId: 'partner-summit',
-      meetings: ['meeting-greenfield-003'],
-      openActionCount: 1
-    }
-  ],
-  partners: [
-    {
-      id: 'partner-axel',
-      name: 'Northstar IT',
-      country: 'Denmark',
-      associatedCustomers: ['Alteco'],
-      meetings: ['meeting-alteco-001', 'meeting-northstar-002'],
-      openActionCount: 1
-    },
-    {
-      id: 'partner-summit',
-      name: 'Summit Solutions',
-      country: 'Germany',
-      associatedCustomers: ['Greenfield Foods'],
-      meetings: ['meeting-greenfield-003'],
-      openActionCount: 1
-    }
-  ],
-  participants: [
-    {
-      id: 'participant-francesco',
-      name: 'Francesco Rossi',
-      company: 'Tasklet',
-      role: 'Solution Consultant',
-      email: 'francesco@tasklet.com',
-      meetings: ['meeting-alteco-001', 'meeting-northstar-002', 'meeting-greenfield-003'],
-      actions: ['action-1', 'action-3']
-    },
-    {
-      id: 'participant-marco',
-      name: 'Marco Bianchi',
-      company: 'Tasklet',
-      role: 'Product Manager',
-      email: 'marco@tasklet.com',
-      meetings: ['meeting-alteco-001', 'meeting-greenfield-003'],
-      actions: ['action-2', 'action-4']
-    },
-    {
-      id: 'participant-massimo',
-      name: 'Massimo Valli',
-      company: 'Alteco',
-      role: 'Operations Lead',
-      email: 'massimo@alteco.se',
-      meetings: ['meeting-alteco-001', 'meeting-northstar-002'],
-      actions: []
-    },
-    {
-      id: 'participant-niels',
-      name: 'Niels Sorensen',
-      company: 'Northstar IT',
-      role: 'Integration Consultant',
-      email: 'niels@northstarit.dk',
-      meetings: ['meeting-alteco-001', 'meeting-northstar-002'],
-      actions: []
-    }
-  ],
-  actions: [
-    {
-      id: 'action-1',
-      description: 'Share the revised implementation plan and pilot scope',
-      owner: 'Francesco Rossi',
-      sourceMeetingId: 'meeting-alteco-001',
-      dueDate: '2026-06-20',
-      status: 'Open',
-      notes: 'Needed before the next workshop'
-    },
-    {
-      id: 'action-2',
-      description: 'Confirm label requirements for the pilot warehouse',
-      owner: 'Marco Bianchi',
-      sourceMeetingId: 'meeting-alteco-001',
-      dueDate: '2026-06-24',
-      status: 'Waiting for Customer',
-      notes: 'Awaiting the customer’s final label list'
-    },
-    {
-      id: 'action-3',
-      description: 'Send the onboarding checklist to the implementation team',
-      owner: 'Francesco Rossi',
-      sourceMeetingId: 'meeting-northstar-002',
-      dueDate: '2026-06-27',
-      status: 'Open',
-      notes: 'Needed before the next internal checkpoint'
-    },
-    {
-      id: 'action-4',
-      description: 'Document the current warehouse workflow and pain points',
-      owner: 'Marco Bianchi',
-      sourceMeetingId: 'meeting-greenfield-003',
-      dueDate: '2026-05-21',
-      status: 'Completed',
-      notes: 'Captured in the discovery notes'
-    }
-  ]
+  meetings: [],
+  customers: [],
+  partners: [],
+  participants: [],
+  actions: []
 };
 
 const MAX_IMPORT_FILE_SIZE_BYTES = 10 * 1024 * 1024;
@@ -979,7 +796,7 @@ function createMeetingId() {
 }
 
 function getAllMeetings() {
-  return [...sampleData.meetings, ...state.savedMeetings].map(normalizeMeetingRecord);
+  return [...state.savedMeetings].map(normalizeMeetingRecord);
 }
 
 function getMeetingDisplayCustomer(meeting) {
@@ -1062,6 +879,9 @@ function updateImportSaveButtonState() {
 const state = {
   activeSection: 'dashboard',
   selectedMeetingId: null,
+  meetingEditMode: false,
+  meetingEditDraft: null,
+  meetingEditError: '',
   selectedCustomerKey: null,
   selectedPartnerKey: null,
   selectedParticipantKey: null,
@@ -1092,6 +912,224 @@ const state = {
     headings: []
   }
 };
+
+function isSavedMeetingEditable(meetingId) {
+  if (!meetingId) {
+    return false;
+  }
+
+  return state.savedMeetings.some((meeting) => meeting && meeting.id === meetingId);
+}
+
+function getSavedMeetingIndex(meetingId) {
+  return state.savedMeetings.findIndex((meeting) => meeting && meeting.id === meetingId);
+}
+
+function getMeetingTextForEdit(value) {
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry) => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  return '';
+}
+
+function getParticipantsTextForEdit(meeting) {
+  if (Array.isArray(meeting.participants)) {
+    return meeting.participants.join(', ');
+  }
+
+  if (typeof meeting.participants === 'string') {
+    return meeting.participants;
+  }
+
+  if (Array.isArray(meeting.participantIds) && meeting.participantIds.length) {
+    return meeting.participantIds
+      .map((participantId) => getParticipantById(participantId))
+      .filter(Boolean)
+      .map((participant) => participant.name)
+      .join(', ');
+  }
+
+  return '';
+}
+
+function createMeetingEditDraft(meeting) {
+  return {
+    title: meeting.title || '',
+    date: normalizeExtractedDate(meeting.date || ''),
+    startTime: meeting.startTime || '',
+    duration: meeting.duration || '',
+    customer: meeting.customer || '',
+    partner: meeting.partner || '',
+    participants: getParticipantsTextForEdit(meeting),
+    subject: meeting.subject || '',
+    summary: getMeetingTextForEdit(meeting.summary),
+    decisions: getMeetingTextForEdit(meeting.decisions),
+    actions: getMeetingTextForEdit(meeting.actions),
+    openQuestions: getMeetingTextForEdit(meeting.openQuestions),
+    commercialNotes: getMeetingTextForEdit(meeting.commercialNotes)
+  };
+}
+
+function parseMeetingTextAreaLines(value) {
+  return String(value || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function parseParticipantsForMeeting(value) {
+  return String(value || '')
+    .split(/[;,]/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function getActionIdsForMeeting(meetingId) {
+  if (!meetingId) {
+    return [];
+  }
+
+  return getCombinedActions()
+    .filter((action) => action.sourceMeetingId === meetingId)
+    .map((action) => action.id);
+}
+
+function enterMeetingEditMode(meeting) {
+  if (!meeting || !isSavedMeetingEditable(meeting.id)) {
+    return;
+  }
+
+  state.meetingEditMode = true;
+  state.meetingEditDraft = createMeetingEditDraft(meeting);
+  state.meetingEditError = '';
+  renderViews();
+}
+
+function cancelMeetingEditMode() {
+  state.meetingEditMode = false;
+  state.meetingEditDraft = null;
+  state.meetingEditError = '';
+  renderViews();
+}
+
+function saveMeetingEdits() {
+  const meetingId = state.selectedMeetingId;
+  const meetingIndex = getSavedMeetingIndex(meetingId);
+  if (meetingIndex < 0) {
+    state.meetingEditError = 'Only meetings saved in this browser can be edited.';
+    renderViews();
+    return;
+  }
+
+  const draft = state.meetingEditDraft || {};
+  const title = String(draft.title || '').trim();
+  const date = String(draft.date || '').trim();
+  const normalizedDate = normalizeExtractedDate(date);
+
+  if (!title) {
+    state.meetingEditError = 'Meeting title is required.';
+    renderViews();
+    return;
+  }
+
+  if (!normalizedDate || normalizedDate !== date) {
+    state.meetingEditError = 'Date is required and must use YYYY-MM-DD.';
+    renderViews();
+    return;
+  }
+
+  const existingMeeting = state.savedMeetings[meetingIndex];
+  const updatedMeeting = {
+    ...existingMeeting,
+    title,
+    date: normalizedDate,
+    startTime: String(draft.startTime || '').trim(),
+    duration: String(draft.duration || '').trim(),
+    customer: String(draft.customer || '').trim(),
+    partner: String(draft.partner || '').trim(),
+    participants: parseParticipantsForMeeting(draft.participants),
+    subject: String(draft.subject || '').trim(),
+    summary: parseMeetingTextAreaLines(draft.summary),
+    decisions: parseMeetingTextAreaLines(draft.decisions),
+    actions: parseMeetingTextAreaLines(draft.actions),
+    openQuestions: parseMeetingTextAreaLines(draft.openQuestions),
+    commercialNotes: parseMeetingTextAreaLines(draft.commercialNotes),
+    updatedAt: new Date().toISOString()
+  };
+
+  const updatedMeetings = [...state.savedMeetings];
+  updatedMeetings[meetingIndex] = updatedMeeting;
+
+  const stored = writeStoredMeetings(updatedMeetings);
+  if (!stored) {
+    state.meetingEditError = 'Unable to save changes in this browser.';
+    renderViews();
+    return;
+  }
+
+  state.savedMeetings = updatedMeetings;
+  state.meetingEditMode = false;
+  state.meetingEditDraft = null;
+  state.meetingEditError = '';
+  renderViews();
+}
+
+function deleteSavedMeeting() {
+  const meetingId = state.selectedMeetingId;
+  const meetingIndex = getSavedMeetingIndex(meetingId);
+  if (meetingIndex < 0) {
+    return;
+  }
+
+  const meeting = state.savedMeetings[meetingIndex];
+  const confirmed = window.confirm(`Delete "${meeting.title}"?\n\nThis removes the saved meeting from this browser.`);
+  if (!confirmed) {
+    return;
+  }
+
+  const actionIdsToRemove = new Set(getActionIdsForMeeting(meetingId));
+  const nextOverrides = Object.entries(state.actionOverrides).reduce((accumulator, [actionId, record]) => {
+    if (!actionIdsToRemove.has(actionId)) {
+      accumulator[actionId] = record;
+    }
+    return accumulator;
+  }, {});
+
+  const overridesStored = writeStoredActionOverrides(nextOverrides);
+  if (!overridesStored) {
+    state.meetingEditError = 'Unable to remove related action overrides.';
+    renderViews();
+    return;
+  }
+
+  const updatedMeetings = state.savedMeetings.filter((meetingItem) => meetingItem.id !== meetingId);
+  const meetingsStored = writeStoredMeetings(updatedMeetings);
+  if (!meetingsStored) {
+    state.meetingEditError = 'Unable to delete this meeting in this browser.';
+    renderViews();
+    return;
+  }
+
+  state.actionOverrides = nextOverrides;
+  state.savedMeetings = updatedMeetings;
+  state.selectedMeetingId = null;
+  state.meetingEditMode = false;
+  state.meetingEditDraft = null;
+  state.meetingEditError = '';
+  state.searchHighlightedActionId = '';
+  state.activeSection = 'meetings';
+  state.meetingReturnContext = null;
+  renderViews();
+}
 
 const sectionTitles = {
   dashboard: 'Dashboard',
@@ -1155,6 +1193,9 @@ function openSearchResult(result) {
     };
     state.activeSection = 'meetings';
     state.selectedMeetingId = result.id;
+    state.meetingEditMode = false;
+    state.meetingEditDraft = null;
+    state.meetingEditError = '';
     state.activeViewerTab = 'overview';
     renderViews();
     return;
@@ -1168,6 +1209,9 @@ function openSearchResult(result) {
     state.selectedCustomerKey = result.id;
     state.selectedPartnerKey = null;
     state.selectedParticipantKey = null;
+    state.meetingEditMode = false;
+    state.meetingEditDraft = null;
+    state.meetingEditError = '';
     renderViews();
     return;
   }
@@ -1177,6 +1221,9 @@ function openSearchResult(result) {
     state.selectedPartnerKey = result.id;
     state.selectedCustomerKey = null;
     state.selectedParticipantKey = null;
+    state.meetingEditMode = false;
+    state.meetingEditDraft = null;
+    state.meetingEditError = '';
     renderViews();
     return;
   }
@@ -1186,6 +1233,9 @@ function openSearchResult(result) {
     state.selectedParticipantKey = result.id;
     state.selectedCustomerKey = null;
     state.selectedPartnerKey = null;
+    state.meetingEditMode = false;
+    state.meetingEditDraft = null;
+    state.meetingEditError = '';
     renderViews();
     return;
   }
@@ -1197,6 +1247,9 @@ function openSearchResult(result) {
     state.selectedCustomerKey = null;
     state.selectedPartnerKey = null;
     state.selectedParticipantKey = null;
+    state.meetingEditMode = false;
+    state.meetingEditDraft = null;
+    state.meetingEditError = '';
     renderViews();
   }
 }
@@ -1209,6 +1262,9 @@ function init() {
     button.addEventListener('click', () => {
       state.activeSection = button.dataset.section;
       state.selectedMeetingId = null;
+      state.meetingEditMode = false;
+      state.meetingEditDraft = null;
+      state.meetingEditError = '';
       state.selectedCustomerKey = null;
       state.selectedPartnerKey = null;
       state.selectedParticipantKey = null;
@@ -1312,11 +1368,23 @@ function renderViews() {
 
   if (state.activeSection === 'meetings' && state.selectedMeetingId) {
     const selectedMeeting = getMeetingById(state.selectedMeetingId);
-    viewSections.meetings.innerHTML = selectedMeeting ? renderMeetingDetailViewer(selectedMeeting) : renderMeetingsPage();
-    if (selectedMeeting) {
+    if (!selectedMeeting) {
+      state.selectedMeetingId = null;
+      state.meetingEditMode = false;
+      state.meetingEditDraft = null;
+      state.meetingEditError = '';
+      viewSections.meetings.innerHTML = renderMeetingsPage();
+    } else {
+      viewSections.meetings.innerHTML = state.meetingEditMode ? renderMeetingEditForm(selectedMeeting) : renderMeetingDetailViewer(selectedMeeting);
+    }
+
+    if (selectedMeeting && !state.meetingEditMode) {
       populateViewerContent(selectedMeeting);
     }
   } else {
+    state.meetingEditMode = false;
+    state.meetingEditDraft = null;
+    state.meetingEditError = '';
     viewSections.meetings.innerHTML = renderMeetingsPage();
   }
 
@@ -1772,18 +1840,7 @@ function getMeetingOpenActionCount(meeting) {
     return 0;
   }
 
-  if (Array.isArray(meeting.actionItemIds) && meeting.actionItemIds.length) {
-    return meeting.actionItemIds
-      .map((actionId) => sampleData.actions.find((entry) => entry.id === actionId))
-      .filter((action) => action && action.status !== 'Completed' && action.status !== 'Cancelled')
-      .length;
-  }
-
-  if (Array.isArray(meeting.actions)) {
-    return meeting.actions.filter((action) => typeof action === 'string' && action.trim()).length;
-  }
-
-  return 0;
+  return getCombinedActions().filter((action) => action.sourceMeetingId === meeting.id && !isActionClosed(action)).length;
 }
 
 function getTodayDateString() {
@@ -1944,25 +2001,6 @@ function getEffectiveActionDueDate(defaultDueDate, override) {
 
 function getCombinedActions() {
   const actions = [];
-
-  sampleData.actions.forEach((action) => {
-    const sourceMeeting = getMeetingById(action.sourceMeetingId);
-    const override = getActionOverride(action.id);
-
-    actions.push({
-      id: action.id,
-      description: normalizeCompanyName(action.description),
-      owner: normalizeCompanyName(action.owner),
-      notes: normalizeCompanyName(action.notes),
-      status: getEffectiveActionStatus(action.status, override),
-      dueDate: getEffectiveActionDueDate(action.dueDate, override),
-      sourceMeetingId: action.sourceMeetingId,
-      sourceMeetingTitle: sourceMeeting ? sourceMeeting.title : 'Unknown meeting',
-      customer: sourceMeeting ? getMeetingDisplayCustomer(sourceMeeting) : 'Unassigned',
-      partner: sourceMeeting ? getMeetingDisplayPartner(sourceMeeting) : 'Unassigned',
-      sourceType: 'structured'
-    });
-  });
 
   getAllMeetings().forEach((meeting) => {
     const importedLines = getImportedActionLinesFromMeeting(meeting);
@@ -2240,17 +2278,11 @@ function extractParticipantRecordsFromMeeting(meeting) {
 }
 
 function getMeetingStructuredActions(meeting) {
-  if (!meeting || typeof meeting !== 'object') {
+  if (!meeting || typeof meeting !== 'object' || !Array.isArray(meeting.actionItems)) {
     return [];
   }
 
-  if (Array.isArray(meeting.actionItemIds) && meeting.actionItemIds.length) {
-    return meeting.actionItemIds
-      .map((actionId) => sampleData.actions.find((entry) => entry.id === actionId))
-      .filter(Boolean);
-  }
-
-  return sampleData.actions.filter((action) => action.sourceMeetingId === meeting.id);
+  return meeting.actionItems.filter((action) => action && typeof action === 'object');
 }
 
 function isActionLineAssignedToParticipant(actionLine, participantName) {
@@ -2440,6 +2472,8 @@ function renderDashboard(meetings) {
   const openActions = combinedActions.filter((action) => !isActionClosed(action)).length;
   const recentMeetings = meetings.slice(0, 3);
   const followUps = combinedActions.filter((action) => !isActionClosed(action)).slice(0, 3);
+  const hasRealData = totalMeetings > 0 || combinedActions.length > 0;
+  const emptyState = hasRealData ? '' : '<div class="empty-state">No meetings have been saved yet. Import a transcript to start building your meeting knowledge base.</div>';
 
   return `
     <section class="hero-panel">
@@ -2447,7 +2481,7 @@ function renderDashboard(meetings) {
         <p class="eyebrow">Overview</p>
         <h3>Keep customer, partner, and follow-up activity in one calm workspace.</h3>
       </div>
-      <p>Review the latest Alteco demo, recent follow-ups, and the current action queue from one screen.</p>
+      <p>Review recent meetings, track follow-ups, and keep key customer conversations in one place.</p>
     </section>
 
     <section class="statistics" aria-label="Overview statistics">
@@ -2488,6 +2522,8 @@ function renderDashboard(meetings) {
         </div>
       </div>
     </section>
+
+    ${emptyState}
   `;
 }
 
@@ -2531,14 +2567,14 @@ function renderMeetingListItem(meeting, options = {}) {
       <div class="meeting-card-header">
         <div>
           <p class="meeting-meta">${formatDate(meeting.date)} · ${getMeetingDurationLabel(meeting)}</p>
-          <h4>${meeting.title}</h4>
+          <h4>${escapeHtml(meeting.title || 'Untitled meeting')}</h4>
         </div>
-        <span class="meeting-status ${meeting.meetingType === 'Demo' ? '' : 'completed'}">${meeting.meetingType || 'Imported'}</span>
+        <span class="meeting-status ${meeting.meetingType === 'Demo' ? '' : 'completed'}">${escapeHtml(meeting.meetingType || 'Imported')}</span>
       </div>
       <div class="meeting-table-details">
-        <div><strong>Customer</strong><span>${customer}</span></div>
-        <div><strong>Partner</strong><span>${partner}</span></div>
-        <div><strong>Participants</strong><span>${participantNames}</span></div>
+        <div><strong>Customer</strong><span>${escapeHtml(customer)}</span></div>
+        <div><strong>Partner</strong><span>${escapeHtml(partner)}</span></div>
+        <div><strong>Participants</strong><span>${escapeHtml(participantNames)}</span></div>
         <div><strong>Open actions</strong><span>${openActions}</span></div>
       </div>
     </button>
@@ -2550,6 +2586,7 @@ function renderMeetingDetailViewer(meeting) {
   const customer = getMeetingDisplayCustomer(meeting);
   const partner = getMeetingDisplayPartner(meeting);
   const openActions = getMeetingOpenActionCount(meeting);
+  const canEdit = isSavedMeetingEditable(meeting.id);
   const durationLabel = (typeof meeting.duration === 'string' && meeting.duration.trim())
     ? meeting.duration
     : (typeof meeting.durationMinutes === 'number' && meeting.durationMinutes > 0 ? `${meeting.durationMinutes} minutes` : 'Not captured yet');
@@ -2561,32 +2598,36 @@ function renderMeetingDetailViewer(meeting) {
       <div class="section-heading viewer-heading">
         <div>
           <p class="eyebrow">Meeting viewer</p>
-          <h3>${meeting.title}</h3>
-          <p>${subjectText}</p>
+          <h3>${escapeHtml(meeting.title || 'Untitled meeting')}</h3>
+          <p>${escapeHtml(subjectText)}</p>
         </div>
-        <button class="secondary-button js-back-to-meetings" type="button">← Return to meetings</button>
+        <div class="sort-controls">
+          ${canEdit ? '<button class="secondary-button js-edit-meeting" type="button">Edit Meeting</button>' : ''}
+          ${canEdit ? '<button class="secondary-button js-delete-meeting" type="button">Delete Meeting</button>' : ''}
+          <button class="secondary-button js-back-to-meetings" type="button">← Return to meetings</button>
+        </div>
       </div>
 
       <div class="viewer-meta-grid">
         <div>
           <strong>Date</strong>
-          <span>${dateLabel}</span>
+          <span>${escapeHtml(dateLabel)}</span>
         </div>
         <div>
           <strong>Customer</strong>
-          <span>${customer}</span>
+          <span>${escapeHtml(customer)}</span>
         </div>
         <div>
           <strong>Partner</strong>
-          <span>${partner}</span>
+          <span>${escapeHtml(partner)}</span>
         </div>
         <div>
           <strong>Participants</strong>
-          <span>${attendeeNames}</span>
+          <span>${escapeHtml(attendeeNames)}</span>
         </div>
         <div>
           <strong>Duration</strong>
-          <span>${durationLabel}</span>
+          <span>${escapeHtml(durationLabel)}</span>
         </div>
         <div>
           <strong>Open actions</strong>
@@ -2603,6 +2644,83 @@ function renderMeetingDetailViewer(meeting) {
       </div>
 
       <div class="viewer-content" id="viewer-content"></div>
+    </section>
+  `;
+}
+
+function renderMeetingEditForm(meeting) {
+  const draft = state.meetingEditDraft || createMeetingEditDraft(meeting);
+  const errorMessage = state.meetingEditError
+    ? `<p class="import-error" role="alert">${escapeHtml(state.meetingEditError)}</p>`
+    : '';
+
+  return `
+    <section class="panel-card">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Edit meeting</p>
+          <h3>${escapeHtml(meeting.title || 'Meeting')}</h3>
+        </div>
+      </div>
+      ${errorMessage}
+      <div class="import-review-grid">
+        <label class="import-field-group">
+          <span>Meeting title</span>
+          <input class="import-field js-meeting-edit-field" type="text" data-edit-field="title" value="${escapeHtml(draft.title)}" required>
+        </label>
+        <label class="import-field-group">
+          <span>Date</span>
+          <input class="import-field js-meeting-edit-field" type="date" data-edit-field="date" value="${escapeHtml(draft.date)}" required>
+        </label>
+        <label class="import-field-group">
+          <span>Start time</span>
+          <input class="import-field js-meeting-edit-field" type="text" data-edit-field="startTime" value="${escapeHtml(draft.startTime)}">
+        </label>
+        <label class="import-field-group">
+          <span>Duration</span>
+          <input class="import-field js-meeting-edit-field" type="text" data-edit-field="duration" value="${escapeHtml(draft.duration)}">
+        </label>
+        <label class="import-field-group">
+          <span>Customer</span>
+          <input class="import-field js-meeting-edit-field" type="text" data-edit-field="customer" value="${escapeHtml(draft.customer)}">
+        </label>
+        <label class="import-field-group">
+          <span>Partner</span>
+          <input class="import-field js-meeting-edit-field" type="text" data-edit-field="partner" value="${escapeHtml(draft.partner)}">
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Participants (comma or semicolon separated)</span>
+          <input class="import-field js-meeting-edit-field" type="text" data-edit-field="participants" value="${escapeHtml(draft.participants)}">
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Subject</span>
+          <textarea class="import-field import-field--textarea js-meeting-edit-field" data-edit-field="subject">${escapeHtml(draft.subject)}</textarea>
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Summary</span>
+          <textarea class="import-field import-field--textarea js-meeting-edit-field" data-edit-field="summary">${escapeHtml(draft.summary)}</textarea>
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Decisions</span>
+          <textarea class="import-field import-field--textarea js-meeting-edit-field" data-edit-field="decisions">${escapeHtml(draft.decisions)}</textarea>
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Actions text</span>
+          <textarea class="import-field import-field--textarea js-meeting-edit-field" data-edit-field="actions">${escapeHtml(draft.actions)}</textarea>
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Open questions</span>
+          <textarea class="import-field import-field--textarea js-meeting-edit-field" data-edit-field="openQuestions">${escapeHtml(draft.openQuestions)}</textarea>
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Commercial notes</span>
+          <textarea class="import-field import-field--textarea js-meeting-edit-field" data-edit-field="commercialNotes">${escapeHtml(draft.commercialNotes)}</textarea>
+        </label>
+      </div>
+      <div class="import-actions">
+        <button class="primary-button js-save-meeting-edit" type="button">Save Changes</button>
+        <button class="secondary-button js-cancel-meeting-edit" type="button">Cancel</button>
+      </div>
     </section>
   `;
 }
@@ -3257,25 +3375,25 @@ function renderMeetingCard(meeting) {
   const partner = getPartnerById(meeting.partnerId);
   const participantIds = Array.isArray(meeting.participantIds) ? meeting.participantIds : [];
   const participantNames = participantIds.map((id) => getParticipantById(id)).filter(Boolean).map((participant) => participant.name).join(', ');
-  const statusClass = meeting.title.includes('Alteco') ? 'meeting-status' : 'meeting-status completed';
+  const statusClass = 'meeting-status completed';
 
   return `
     <article class="meeting-card">
       <div class="meeting-card-header">
         <div>
           <div class="meeting-tags">
-            ${partner ? `<span class="tag partner-tag">Partner: ${partner.name}</span>` : ''}
-            ${customer ? `<span class="tag customer-tag">Customer: ${customer.name}</span>` : ''}
+            ${partner ? `<span class="tag partner-tag">Partner: ${escapeHtml(partner.name)}</span>` : ''}
+            ${customer ? `<span class="tag customer-tag">Customer: ${escapeHtml(customer.name)}</span>` : ''}
           </div>
-          <h4>${meeting.title}</h4>
+          <h4>${escapeHtml(meeting.title || 'Untitled meeting')}</h4>
           <p class="meeting-meta">${formatDate(meeting.date)} · ${meeting.durationMinutes} minutes · ${participantIds.length} participants</p>
         </div>
-        <span class="${statusClass}">${meeting.title.includes('Alteco') ? 'Follow-up needed' : 'Completed'}</span>
+        <span class="${statusClass}">${escapeHtml(meeting.meetingType || 'Saved')}</span>
       </div>
-      <p class="meeting-summary">${meeting.summary[0]}</p>
+      <p class="meeting-summary">${escapeHtml((Array.isArray(meeting.summary) && meeting.summary[0]) ? meeting.summary[0] : '')}</p>
       <div class="entity-meta">
-        <span class="badge">${meeting.meetingType}</span>
-        <span>Participants: ${participantNames}</span>
+        <span class="badge">${escapeHtml(meeting.meetingType || 'Imported')}</span>
+        <span>Participants: ${escapeHtml(participantNames)}</span>
       </div>
       <button class="secondary-button js-open-meeting" type="button" data-meeting-id="${meeting.id}">Open details</button>
     </article>
@@ -3464,6 +3582,9 @@ function attachInteractions() {
       state.selectedCustomerKey = button.dataset.customerKey || null;
       state.selectedPartnerKey = null;
       state.selectedMeetingId = null;
+      state.meetingEditMode = false;
+      state.meetingEditDraft = null;
+      state.meetingEditError = '';
       state.meetingReturnContext = null;
       renderViews();
     });
@@ -3476,6 +3597,9 @@ function attachInteractions() {
       state.selectedCustomerKey = null;
       state.selectedParticipantKey = null;
       state.selectedMeetingId = null;
+      state.meetingEditMode = false;
+      state.meetingEditDraft = null;
+      state.meetingEditError = '';
       state.meetingReturnContext = null;
       renderViews();
     });
@@ -3488,6 +3612,9 @@ function attachInteractions() {
       state.selectedCustomerKey = null;
       state.selectedPartnerKey = null;
       state.selectedMeetingId = null;
+      state.meetingEditMode = false;
+      state.meetingEditDraft = null;
+      state.meetingEditError = '';
       state.meetingReturnContext = null;
       renderViews();
     });
@@ -3503,8 +3630,55 @@ function attachInteractions() {
         : null;
       state.activeSection = 'meetings';
       state.selectedMeetingId = button.dataset.meetingId;
+      state.meetingEditMode = false;
+      state.meetingEditDraft = null;
+      state.meetingEditError = '';
       state.activeViewerTab = 'overview';
       renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-edit-meeting').forEach((button) => {
+    button.addEventListener('click', () => {
+      const meeting = getMeetingById(state.selectedMeetingId);
+      enterMeetingEditMode(meeting);
+    });
+  });
+
+  document.querySelectorAll('.js-delete-meeting').forEach((button) => {
+    button.addEventListener('click', () => {
+      deleteSavedMeeting();
+    });
+  });
+
+  document.querySelectorAll('.js-meeting-edit-field').forEach((field) => {
+    field.addEventListener('input', () => {
+      const editField = field.dataset.editField;
+      if (!editField) {
+        return;
+      }
+
+      if (!state.meetingEditDraft) {
+        const meeting = getMeetingById(state.selectedMeetingId);
+        state.meetingEditDraft = meeting ? createMeetingEditDraft(meeting) : {};
+      }
+
+      state.meetingEditDraft[editField] = field.value;
+      if (state.meetingEditError) {
+        state.meetingEditError = '';
+      }
+    });
+  });
+
+  document.querySelectorAll('.js-save-meeting-edit').forEach((button) => {
+    button.addEventListener('click', () => {
+      saveMeetingEdits();
+    });
+  });
+
+  document.querySelectorAll('.js-cancel-meeting-edit').forEach((button) => {
+    button.addEventListener('click', () => {
+      cancelMeetingEditMode();
     });
   });
 
@@ -3540,6 +3714,9 @@ function attachInteractions() {
       }
 
       state.selectedMeetingId = null;
+      state.meetingEditMode = false;
+      state.meetingEditDraft = null;
+      state.meetingEditError = '';
       state.meetingReturnContext = null;
       renderViews();
     });
@@ -3695,6 +3872,9 @@ function attachInteractions() {
     topImportButton.addEventListener('click', () => {
       state.activeSection = 'import';
       state.selectedMeetingId = null;
+      state.meetingEditMode = false;
+      state.meetingEditDraft = null;
+      state.meetingEditError = '';
       state.selectedCustomerKey = null;
       state.selectedPartnerKey = null;
       state.selectedParticipantKey = null;
@@ -3710,15 +3890,15 @@ function getMeetingById(meetingId) {
 }
 
 function getCustomerById(customerId) {
-  return sampleData.customers.find((customer) => customer.id === customerId);
+  return getCustomersFromMeetings().find((customer) => customer.id === customerId);
 }
 
 function getPartnerById(partnerId) {
-  return sampleData.partners.find((partner) => partner.id === partnerId);
+  return getPartnersFromMeetings().find((partner) => partner.id === partnerId);
 }
 
 function getParticipantById(participantId) {
-  return sampleData.participants.find((participant) => participant.id === participantId);
+  return getParticipantsFromMeetings().find((participant) => participant.id === participantId);
 }
 
 function getPageTitle() {
