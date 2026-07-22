@@ -194,6 +194,8 @@ const STORAGE_KEY = 'taskletTranscriptApp.meetings';
 const ACTION_OVERRIDES_STORAGE_KEY = 'taskletTranscriptApp.actionOverrides';
 const ACTION_STATUSES = ['Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled'];
 const ACTION_FILTERS = ['All', 'Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled', 'Overdue', 'No due date'];
+const SEARCH_MIN_CHARS = 2;
+const SEARCH_DEBOUNCE_MS = 180;
 
 function createEmptyImportReview() {
   return {
@@ -1069,6 +1071,10 @@ const state = {
   activeViewerTab: 'overview',
   sortOrder: 'newest',
   searchQuery: '',
+  searchDebounceHandle: null,
+  searchResultsOpen: false,
+  searchActiveIndex: -1,
+  searchHighlightedActionId: '',
   savedMeetings: readStoredMeetings(),
   importSelectedFile: null,
   importError: '',
@@ -1100,6 +1106,101 @@ const sectionTitles = {
 const mainPanelIds = ['dashboard-view', 'meetings-view', 'customers-view', 'partners-view', 'participants-view', 'actions-view', 'import-view'];
 const viewerTabs = ['overview', 'summary', 'decisions', 'actions', 'questions', 'commercial', 'additionalSections', 'transcript'];
 
+function closeSearchResults(clearQuery = false) {
+  if (state.searchDebounceHandle) {
+    clearTimeout(state.searchDebounceHandle);
+    state.searchDebounceHandle = null;
+  }
+
+  state.searchResultsOpen = false;
+  state.searchActiveIndex = -1;
+
+  if (clearQuery) {
+    state.searchQuery = '';
+  }
+}
+
+function scheduleSearchRender(queryText) {
+  state.searchQuery = queryText;
+
+  if (state.searchDebounceHandle) {
+    clearTimeout(state.searchDebounceHandle);
+  }
+
+  state.searchDebounceHandle = setTimeout(() => {
+    const normalized = normalizeSearchQuery(state.searchQuery);
+    state.searchResultsOpen = normalized.length >= SEARCH_MIN_CHARS;
+    state.searchActiveIndex = -1;
+    state.searchDebounceHandle = null;
+    renderViews();
+  }, SEARCH_DEBOUNCE_MS);
+}
+
+function getCurrentFlatSearchResults() {
+  return getGlobalSearchResults().flatResults;
+}
+
+function openSearchResult(result) {
+  if (!result) {
+    return;
+  }
+
+  state.searchResultsOpen = false;
+  state.searchActiveIndex = -1;
+
+  if (result.type === 'meeting') {
+    state.meetingReturnContext = {
+      section: 'search',
+      key: state.activeSection
+    };
+    state.activeSection = 'meetings';
+    state.selectedMeetingId = result.id;
+    state.activeViewerTab = 'overview';
+    renderViews();
+    return;
+  }
+
+  state.meetingReturnContext = null;
+  state.selectedMeetingId = null;
+
+  if (result.type === 'customer') {
+    state.activeSection = 'customers';
+    state.selectedCustomerKey = result.id;
+    state.selectedPartnerKey = null;
+    state.selectedParticipantKey = null;
+    renderViews();
+    return;
+  }
+
+  if (result.type === 'partner') {
+    state.activeSection = 'partners';
+    state.selectedPartnerKey = result.id;
+    state.selectedCustomerKey = null;
+    state.selectedParticipantKey = null;
+    renderViews();
+    return;
+  }
+
+  if (result.type === 'participant') {
+    state.activeSection = 'participants';
+    state.selectedParticipantKey = result.id;
+    state.selectedCustomerKey = null;
+    state.selectedPartnerKey = null;
+    renderViews();
+    return;
+  }
+
+  if (result.type === 'action') {
+    state.activeSection = 'actions';
+    state.actionFilter = 'All';
+    state.searchHighlightedActionId = result.id;
+    state.selectedCustomerKey = null;
+    state.selectedPartnerKey = null;
+    state.selectedParticipantKey = null;
+    renderViews();
+  }
+}
+
 function init() {
   const navigationButtons = document.querySelectorAll('.nav-button');
   const searchInput = document.getElementById('global-search');
@@ -1112,15 +1213,69 @@ function init() {
       state.selectedPartnerKey = null;
       state.selectedParticipantKey = null;
       state.meetingReturnContext = null;
+      state.searchResultsOpen = false;
+      state.searchActiveIndex = -1;
       state.activeViewerTab = 'overview';
       renderViews();
     });
   });
 
-  searchInput.addEventListener('input', (event) => {
-    state.searchQuery = event.target.value.trim().toLowerCase();
-    renderViews();
-  });
+  if (searchInput) {
+    searchInput.value = state.searchQuery;
+
+    searchInput.addEventListener('input', (event) => {
+      scheduleSearchRender(event.target.value);
+    });
+
+    searchInput.addEventListener('keydown', (event) => {
+      const flatResults = getCurrentFlatSearchResults();
+
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSearchResults(true);
+        renderViews();
+        return;
+      }
+
+      if (!state.searchResultsOpen || !flatResults.length) {
+        return;
+      }
+
+      if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        state.searchActiveIndex = (state.searchActiveIndex + 1 + flatResults.length) % flatResults.length;
+        renderViews();
+        return;
+      }
+
+      if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        state.searchActiveIndex = (state.searchActiveIndex - 1 + flatResults.length) % flatResults.length;
+        renderViews();
+        return;
+      }
+
+      if (event.key === 'Enter') {
+        if (state.searchActiveIndex >= 0 && state.searchActiveIndex < flatResults.length) {
+          event.preventDefault();
+          openSearchResult(flatResults[state.searchActiveIndex]);
+        }
+      }
+    });
+
+    document.addEventListener('click', (event) => {
+      if (!state.searchResultsOpen) {
+        return;
+      }
+
+      const searchField = document.querySelector('.search-field');
+      if (searchField && !searchField.contains(event.target)) {
+        state.searchResultsOpen = false;
+        state.searchActiveIndex = -1;
+        renderViews();
+      }
+    });
+  }
 
   renderViews();
 }
@@ -1176,13 +1331,26 @@ function renderViews() {
     section: button.dataset.section
   })));
 
+  const searchInput = document.getElementById('global-search');
+  if (searchInput && searchInput.value !== state.searchQuery) {
+    searchInput.value = state.searchQuery;
+  }
+
+  renderGlobalSearchPanel();
   document.getElementById('page-title').textContent = getPageTitle();
   attachInteractions();
   updateImportSaveButtonState();
+
+  if (state.activeSection === 'actions' && state.searchHighlightedActionId) {
+    const highlightedAction = document.querySelector(`.action-card[data-action-id="${state.searchHighlightedActionId}"]`);
+    if (highlightedAction) {
+      highlightedAction.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }
 }
 
 function getVisibleMeetings() {
-  const query = state.searchQuery;
+  const query = normalizeSearchQuery(state.searchQuery);
   const meetings = getAllMeetings().sort((a, b) => {
     const order = state.sortOrder === 'oldest' ? 1 : -1;
     const dateA = new Date(a.date || a.createdAt || '1970-01-01').getTime();
@@ -1190,7 +1358,7 @@ function getVisibleMeetings() {
     return order * (dateA - dateB);
   });
 
-  if (!query) {
+  if (!query || query.length < SEARCH_MIN_CHARS) {
     return meetings;
   }
 
@@ -1220,6 +1388,317 @@ function normalizeCompanyName(value) {
   return String(value || '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function normalizeSearchQuery(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeSearchText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function includesSearchText(value, normalizedQuery) {
+  if (!normalizedQuery) {
+    return false;
+  }
+
+  return normalizeSearchText(value).includes(normalizedQuery);
+}
+
+function getSearchExcerpt(value, normalizedQuery, maxLength = 140) {
+  const text = normalizeCompanyName(value);
+  if (!text) {
+    return '';
+  }
+
+  const lowerText = text.toLowerCase();
+  const index = lowerText.indexOf(normalizedQuery);
+  if (index < 0) {
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+  }
+
+  const half = Math.floor(maxLength / 2);
+  const start = Math.max(0, index - half);
+  const end = Math.min(text.length, start + maxLength);
+  const prefix = start > 0 ? '... ' : '';
+  const suffix = end < text.length ? ' ...' : '';
+  return `${prefix}${text.slice(start, end)}${suffix}`;
+}
+
+function getHighlightedHtml(value, normalizedQuery) {
+  const text = String(value || '');
+  if (!text) {
+    return '';
+  }
+
+  if (!normalizedQuery) {
+    return escapeHtml(text);
+  }
+
+  const lowerText = text.toLowerCase();
+  const index = lowerText.indexOf(normalizedQuery);
+  if (index < 0) {
+    return escapeHtml(text);
+  }
+
+  const before = text.slice(0, index);
+  const match = text.slice(index, index + normalizedQuery.length);
+  const after = text.slice(index + normalizedQuery.length);
+  return `${escapeHtml(before)}<mark>${escapeHtml(match)}</mark>${escapeHtml(after)}`;
+}
+
+function getMeetingSearchFields(meeting) {
+  const additionalSectionLines = Array.isArray(meeting.extraSections)
+    ? meeting.extraSections.flatMap((section) => {
+      const heading = normalizeCompanyName(section && section.heading);
+      const lines = Array.isArray(section && section.lines) ? section.lines : [];
+      return [heading, ...lines];
+    }).filter(Boolean)
+    : [];
+
+  return [
+    meeting.title,
+    meeting.date,
+    getMeetingDisplayCustomer(meeting),
+    getMeetingDisplayPartner(meeting),
+    getMeetingDisplayParticipants(meeting),
+    meeting.subject,
+    Array.isArray(meeting.summary) ? meeting.summary.join(' ') : meeting.summary,
+    Array.isArray(meeting.decisions) ? meeting.decisions.join(' ') : meeting.decisions,
+    Array.isArray(meeting.actions) ? meeting.actions.join(' ') : meeting.actions,
+    Array.isArray(meeting.openQuestions) ? meeting.openQuestions.join(' ') : meeting.openQuestions,
+    Array.isArray(meeting.commercialNotes) ? meeting.commercialNotes.join(' ') : meeting.commercialNotes,
+    meeting.cleanedTranscript,
+    meeting.extractedText,
+    Array.isArray(meeting.tags) ? meeting.tags.join(' ') : meeting.tags,
+    additionalSectionLines.join(' ')
+  ].filter(Boolean);
+}
+
+function findMeetingMatchExcerpt(meeting, normalizedQuery) {
+  const fields = getMeetingSearchFields(meeting);
+  const matchedField = fields.find((field) => includesSearchText(field, normalizedQuery));
+  if (!matchedField) {
+    return '';
+  }
+
+  return getSearchExcerpt(matchedField, normalizedQuery, 150);
+}
+
+function getGlobalSearchResults() {
+  const normalizedQuery = normalizeSearchQuery(state.searchQuery);
+  if (normalizedQuery.length < SEARCH_MIN_CHARS) {
+    return {
+      normalizedQuery,
+      totalCount: 0,
+      flatResults: [],
+      groups: {
+        meetings: [],
+        customers: [],
+        partners: [],
+        participants: [],
+        actions: []
+      },
+      totalByGroup: {
+        meetings: 0,
+        customers: 0,
+        partners: 0,
+        participants: 0,
+        actions: 0
+      }
+    };
+  }
+
+  const allMeetingMatches = getAllMeetings()
+    .map((meeting) => {
+      const excerpt = findMeetingMatchExcerpt(meeting, normalizedQuery);
+      if (!excerpt) {
+        return null;
+      }
+
+      return {
+        type: 'meeting',
+        id: meeting.id,
+        title: meeting.title || 'Untitled meeting',
+        date: meeting.date || '',
+        customer: getMeetingDisplayCustomer(meeting),
+        partner: getMeetingDisplayPartner(meeting),
+        excerpt
+      };
+    })
+    .filter(Boolean);
+
+  const meetings = allMeetingMatches.slice(0, 5);
+
+  const allCustomerMatches = getCustomersFromMeetings()
+    .filter((customer) => {
+      const searchBlob = [customer.name, customer.relatedNames.join(' '), customer.latestMeetingDate].join(' ');
+      return includesSearchText(searchBlob, normalizedQuery);
+    })
+    .map((customer) => ({
+      type: 'customer',
+      id: customer.key,
+      title: customer.name,
+      detail: `${customer.meetings.length} meetings`
+    }));
+
+  const customers = allCustomerMatches.slice(0, 5);
+
+  const allPartnerMatches = getPartnersFromMeetings()
+    .filter((partner) => {
+      const searchBlob = [partner.name, partner.relatedNames.join(' '), partner.latestMeetingDate].join(' ');
+      return includesSearchText(searchBlob, normalizedQuery);
+    })
+    .map((partner) => ({
+      type: 'partner',
+      id: partner.key,
+      title: partner.name,
+      detail: `${partner.meetings.length} meetings`
+    }));
+
+  const partners = allPartnerMatches.slice(0, 5);
+
+  const allParticipantMatches = getParticipantsFromMeetings()
+    .filter((participant) => {
+      const searchBlob = [participant.name, participant.companies.join(' '), participant.fallbackEntry].join(' ');
+      return includesSearchText(searchBlob, normalizedQuery);
+    })
+    .map((participant) => ({
+      type: 'participant',
+      id: participant.key,
+      title: participant.name,
+      detail: `${participant.meetings.length} meetings`
+    }));
+
+  const participants = allParticipantMatches.slice(0, 5);
+
+  const allActionMatches = sortCombinedActions(getCombinedActions())
+    .filter((action) => {
+      const searchBlob = [
+        action.description,
+        action.owner,
+        action.notes,
+        action.status,
+        action.dueDate,
+        action.sourceMeetingTitle,
+        action.customer,
+        action.partner
+      ].join(' ');
+      return includesSearchText(searchBlob, normalizedQuery);
+    })
+    .map((action) => ({
+      type: 'action',
+      id: action.id,
+      title: action.description,
+      detail: action.sourceMeetingTitle
+    }));
+
+  const actions = allActionMatches.slice(0, 5);
+
+  const groups = { meetings, customers, partners, participants, actions };
+  const flatResults = [
+    ...meetings,
+    ...customers,
+    ...partners,
+    ...participants,
+    ...actions
+  ];
+
+  return {
+    normalizedQuery,
+    totalCount: allMeetingMatches.length + allCustomerMatches.length + allPartnerMatches.length + allParticipantMatches.length + allActionMatches.length,
+    flatResults,
+    groups,
+    totalByGroup: {
+      meetings: allMeetingMatches.length,
+      customers: allCustomerMatches.length,
+      partners: allPartnerMatches.length,
+      participants: allParticipantMatches.length,
+      actions: allActionMatches.length
+    }
+  };
+}
+
+function renderSearchResultGroup(groupTitle, groupKey, results, normalizedQuery, flatResults, totalInGroup) {
+  if (!results.length) {
+    return '';
+  }
+
+  const items = results.map((result) => {
+    if (result.type === 'meeting') {
+      const activeIndex = state.searchActiveIndex;
+      const itemIndex = flatResults.findIndex((item) => item.type === result.type && item.id === result.id);
+      const activeClass = itemIndex === activeIndex ? 'active' : '';
+      return `
+        <button class="search-result-item ${activeClass} js-search-result" type="button" data-result-type="meeting" data-result-id="${escapeHtml(result.id)}">
+          <strong>${getHighlightedHtml(result.title, normalizedQuery)}</strong>
+          <span>${escapeHtml(formatDate(result.date))} · ${getHighlightedHtml(result.customer || 'Unassigned', normalizedQuery)} · ${getHighlightedHtml(result.partner || 'Unassigned', normalizedQuery)}</span>
+          <span>${getHighlightedHtml(result.excerpt, normalizedQuery)}</span>
+        </button>
+      `;
+    }
+
+    const activeIndex = state.searchActiveIndex;
+    const itemIndex = flatResults.findIndex((item) => item.type === result.type && item.id === result.id);
+    const activeClass = itemIndex === activeIndex ? 'active' : '';
+
+    return `
+      <button class="search-result-item ${activeClass} js-search-result" type="button" data-result-type="${escapeHtml(result.type)}" data-result-id="${escapeHtml(result.id)}">
+        <strong>${getHighlightedHtml(result.title, normalizedQuery)}</strong>
+        <span>${getHighlightedHtml(result.detail || '', normalizedQuery)}</span>
+      </button>
+    `;
+  }).join('');
+
+  return `
+    <section class="search-result-group" data-group="${escapeHtml(groupKey)}">
+      <h4>${escapeHtml(groupTitle)}${totalInGroup > results.length ? ` (${results.length}/${totalInGroup})` : ` (${totalInGroup})`}</h4>
+      <div class="search-result-group-list">${items}</div>
+    </section>
+  `;
+}
+
+function renderGlobalSearchPanel() {
+  const searchField = document.querySelector('.search-field');
+  if (!searchField) {
+    return;
+  }
+
+  const existingPanel = searchField.querySelector('.search-results-panel');
+  if (existingPanel) {
+    existingPanel.remove();
+  }
+
+  const resultModel = getGlobalSearchResults();
+  if (!state.searchResultsOpen || resultModel.normalizedQuery.length < SEARCH_MIN_CHARS) {
+    return;
+  }
+
+  const panel = document.createElement('div');
+  panel.className = 'search-results-panel';
+
+  const emptyState = '<p class="search-results-empty">No results found.</p>';
+  const groupsHtml = [
+    renderSearchResultGroup('Meetings', 'meetings', resultModel.groups.meetings, resultModel.normalizedQuery, resultModel.flatResults, resultModel.totalByGroup.meetings),
+    renderSearchResultGroup('Customers', 'customers', resultModel.groups.customers, resultModel.normalizedQuery, resultModel.flatResults, resultModel.totalByGroup.customers),
+    renderSearchResultGroup('Partners', 'partners', resultModel.groups.partners, resultModel.normalizedQuery, resultModel.flatResults, resultModel.totalByGroup.partners),
+    renderSearchResultGroup('Participants', 'participants', resultModel.groups.participants, resultModel.normalizedQuery, resultModel.flatResults, resultModel.totalByGroup.participants),
+    renderSearchResultGroup('Actions', 'actions', resultModel.groups.actions, resultModel.normalizedQuery, resultModel.flatResults, resultModel.totalByGroup.actions)
+  ].join('');
+
+  panel.innerHTML = `
+    <div class="search-results-summary">${resultModel.totalCount} results</div>
+    ${resultModel.totalCount ? groupsHtml : emptyState}
+  `;
+
+  searchField.appendChild(panel);
 }
 
 function getNameGroupingKey(value) {
@@ -2809,12 +3288,13 @@ function renderActionCard(action, options = {}) {
   const ownerLabel = action.owner || 'Unassigned';
   const notesLabel = action.notes || 'No notes';
   const dueDateLabel = action.dueDate ? formatDate(action.dueDate) : 'No due date';
+  const highlightedClass = state.searchHighlightedActionId === action.id ? ' action-card--highlighted' : '';
   const statusOptions = ACTION_STATUSES.map((status) => `
     <option value="${escapeHtml(status)}" ${status === action.status ? 'selected' : ''}>${escapeHtml(status)}</option>
   `).join('');
 
   return `
-    <article class="action-card">
+    <article class="action-card${highlightedClass}" data-action-id="${escapeHtml(action.id)}">
       <h4>${escapeHtml(action.description)}</h4>
       <p>${escapeHtml(notesLabel)}</p>
       <div class="action-meta">
@@ -3050,11 +3530,35 @@ function attachInteractions() {
         state.selectedCustomerKey = null;
         state.selectedPartnerKey = null;
         state.selectedParticipantKey = null;
+      } else if (state.meetingReturnContext && state.meetingReturnContext.section === 'search') {
+        state.activeSection = state.meetingReturnContext.key || state.activeSection;
+        state.searchResultsOpen = normalizeSearchQuery(state.searchQuery).length >= SEARCH_MIN_CHARS;
+        state.searchActiveIndex = -1;
+        state.selectedCustomerKey = null;
+        state.selectedPartnerKey = null;
+        state.selectedParticipantKey = null;
       }
 
       state.selectedMeetingId = null;
       state.meetingReturnContext = null;
       renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-search-result').forEach((button) => {
+    button.addEventListener('click', () => {
+      const resultType = button.dataset.resultType;
+      const resultId = button.dataset.resultId;
+      if (!resultType || !resultId) {
+        return;
+      }
+
+      const result = getCurrentFlatSearchResults().find((item) => item.type === resultType && item.id === resultId);
+      if (!result) {
+        return;
+      }
+
+      openSearchResult(result);
     });
   });
 
