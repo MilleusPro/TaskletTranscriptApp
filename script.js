@@ -18,6 +18,16 @@ const SEARCH_MIN_CHARS = 2;
 const SEARCH_DEBOUNCE_MS = 180;
 const AUTH_ERROR_MESSAGE = 'Unable to sign in. Check your email and password and try again.';
 const SUPPORTED_PROFILE_ROLES = ['admin', 'user'];
+const ACTION_OVERRIDE_ROW_COLUMNS = [
+  'id',
+  'user_id',
+  'meeting_id',
+  'action_id',
+  'status',
+  'due_date',
+  'created_at',
+  'updated_at'
+].join(', ');
 const MEETING_ROW_COLUMNS = [
   'id',
   'user_id',
@@ -49,6 +59,7 @@ let appInitialized = false;
 let authFormBound = false;
 let authProfileLoadToken = 0;
 let cloudMeetingsLoadToken = 0;
+let cloudActionOverridesLoadToken = 0;
 
 const authState = {
   checking: true,
@@ -59,6 +70,9 @@ const authState = {
   meetingsLoading: false,
   meetingsLoadError: '',
   meetingsLoaded: false,
+  actionOverridesLoading: false,
+  actionOverridesLoadError: '',
+  actionOverridesLoaded: false,
   error: '',
   status: 'Checking session...'
 };
@@ -223,7 +237,7 @@ function updateAuthView() {
   const { authView, status, error } = getAuthElements();
 
   if (authView) {
-    authView.hidden = Boolean(authState.user) && !authState.meetingsLoading;
+    authView.hidden = Boolean(authState.user) && !authState.meetingsLoading && !authState.actionOverridesLoading;
   }
 
   if (status) {
@@ -250,6 +264,16 @@ function clearCloudMeetingState() {
   authState.meetingsLoadError = '';
   state.migrationInProgress = false;
   state.migrationArchiveAvailable = false;
+}
+
+function clearCloudActionOverrideState() {
+  state.actionOverrides = {};
+  state.actionOverridesError = '';
+  authState.actionOverridesLoading = false;
+  authState.actionOverridesLoadError = '';
+  authState.actionOverridesLoaded = false;
+  state.overrideMigrationInProgress = false;
+  state.overrideMigrationArchiveAvailable = false;
 }
 
 async function loadAuthenticatedMeetings() {
@@ -295,12 +319,72 @@ async function loadAuthenticatedMeetings() {
   return { success: true };
 }
 
+async function loadAuthenticatedActionOverrides() {
+  const loadToken = ++cloudActionOverridesLoadToken;
+
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    clearCloudActionOverrideState();
+    return { success: false, error: 'No authenticated user is available for action override loading.' };
+  }
+
+  authState.actionOverridesLoading = true;
+  authState.actionOverridesLoadError = '';
+  state.actionOverridesError = '';
+  authState.actionOverridesLoaded = false;
+
+  const { data, error } = await supabaseClient
+    .from('action_overrides')
+    .select(ACTION_OVERRIDE_ROW_COLUMNS)
+    .eq('user_id', authState.user.id);
+
+  if (loadToken !== cloudActionOverridesLoadToken) {
+    return { success: false, error: 'Action override loading was superseded by a newer session state.' };
+  }
+
+  authState.actionOverridesLoading = false;
+
+  if (error) {
+    state.actionOverrides = {};
+    authState.actionOverridesLoaded = false;
+    authState.actionOverridesLoadError = 'Unable to load cloud action updates. Please try again.';
+    state.actionOverridesError = authState.actionOverridesLoadError;
+    return { success: false, error: authState.actionOverridesLoadError };
+  }
+
+  state.actionOverrides = Array.isArray(data)
+    ? data.reduce((accumulator, row) => {
+      const override = mapActionOverrideRowToOverride(row);
+      if (!override) {
+        return accumulator;
+      }
+
+      accumulator[override.actionId] = override;
+      return accumulator;
+    }, {})
+    : {};
+  authState.actionOverridesLoaded = true;
+  authState.actionOverridesLoadError = '';
+  state.actionOverridesError = '';
+  return { success: true };
+}
+
+async function loadAuthenticatedCloudData() {
+  const meetingsResult = await loadAuthenticatedMeetings();
+  if (!meetingsResult.success) {
+    return meetingsResult;
+  }
+
+  return loadAuthenticatedActionOverrides();
+}
+
 async function handleRetryCloudMeetings() {
   if (!authState.user) {
     return;
   }
 
-  await loadAuthenticatedMeetings();
+  authState.status = 'Retrying cloud data...';
+  await loadAuthenticatedCloudData();
+  authState.status = '';
   renderViews();
 }
 
@@ -343,6 +427,7 @@ async function setAppAuthenticated(user) {
   const { appShell } = getAuthElements();
   const profileLoadToken = ++authProfileLoadToken;
   ++cloudMeetingsLoadToken;
+  ++cloudActionOverridesLoadToken;
 
   if (appShell) {
     appShell.hidden = true;
@@ -352,6 +437,7 @@ async function setAppAuthenticated(user) {
   authState.checking = false;
   authState.signingIn = false;
   clearCloudMeetingState();
+  clearCloudActionOverrideState();
 
   if (!authState.user) {
     clearAuthenticatedProfileState();
@@ -363,9 +449,9 @@ async function setAppAuthenticated(user) {
 
     authState.profile = profileResult.profile;
     authState.profileWarning = profileResult.warning;
-    authState.status = 'Loading meetings...';
+    authState.status = 'Loading workspace...';
     updateAuthView();
-    await loadAuthenticatedMeetings();
+    await loadAuthenticatedCloudData();
   }
 
   if (appShell) {
@@ -1300,6 +1386,41 @@ function normalizeMeetingParticipants(value) {
   return [];
 }
 
+function getActionOverrideDatabaseId(userId, actionId) {
+  return `action-override-${Math.abs(hashTextStable(`${String(userId || '')}:${String(actionId || '')}`))}`;
+}
+
+function mapActionOverrideRowToOverride(row) {
+  if (!row || typeof row !== 'object') {
+    return null;
+  }
+
+  return sanitizeActionOverrideRecord({
+    actionId: row.action_id,
+    status: row.status,
+    dueDate: row.due_date
+  });
+}
+
+function mapActionOverrideToDatabaseRow(override, authenticatedUserId, meetingId) {
+  const sanitizedOverride = sanitizeActionOverrideRecord(override);
+  if (!sanitizedOverride || !authenticatedUserId || !meetingId) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  return {
+    id: getActionOverrideDatabaseId(authenticatedUserId, sanitizedOverride.actionId),
+    user_id: String(authenticatedUserId),
+    meeting_id: String(meetingId),
+    action_id: sanitizedOverride.actionId,
+    status: sanitizedOverride.status || null,
+    due_date: sanitizedOverride.dueDate || null,
+    created_at: now,
+    updated_at: now
+  };
+}
+
 function mapMeetingToDatabaseRow(meeting, authenticatedUserId) {
   const normalizedMeeting = normalizeMeetingRecord(meeting || {});
   const now = new Date().toISOString();
@@ -1379,6 +1500,10 @@ function mapDatabaseRowToMeeting(row) {
 
 function getLocalStagedMeetings() {
   return readStoredMeetings();
+}
+
+function getLocalStagedActionOverrides() {
+  return readStoredActionOverrides();
 }
 
 function writeStoredMeetings(meetings) {
@@ -1485,7 +1610,7 @@ function buildBackupPayload() {
     exportedAt: new Date().toISOString(),
     data: {
       meetings: [...state.savedMeetings].map(normalizeMeetingRecord),
-      actionOverrides: getNormalizedActionOverridesArray(readStoredActionOverrides()),
+      actionOverrides: getNormalizedActionOverridesArray(state.actionOverrides),
       settings: readStoredSettings()
     }
   };
@@ -1632,7 +1757,7 @@ const state = {
   selectedParticipantKey: null,
   meetingReturnContext: null,
   actionFilter: 'All',
-  actionOverrides: readStoredActionOverrides(),
+  actionOverrides: {},
   activeViewerTab: 'overview',
   sortOrder: 'newest',
   searchQuery: '',
@@ -1644,6 +1769,9 @@ const state = {
   savedSettings: readStoredSettings(),
   cloudMeetingsError: '',
   cloudMeetingsLoaded: false,
+  actionOverridesError: '',
+  overrideMigrationInProgress: false,
+  overrideMigrationArchiveAvailable: false,
   migrationInProgress: false,
   migrationArchiveAvailable: false,
   importSelectedFile: null,
@@ -1882,14 +2010,6 @@ async function deleteSavedMeeting() {
     return accumulator;
   }, {});
 
-  const previousOverrides = { ...state.actionOverrides };
-  const overridesStored = writeStoredActionOverrides(nextOverrides);
-  if (!overridesStored) {
-    state.meetingEditError = 'Unable to remove related action overrides.';
-    renderViews();
-    return;
-  }
-
   const { data, error } = await supabaseClient
     .from('meetings')
     .delete()
@@ -1899,7 +2019,6 @@ async function deleteSavedMeeting() {
     .maybeSingle();
 
   if (error || !data) {
-    writeStoredActionOverrides(previousOverrides);
     state.meetingEditError = 'Unable to delete this meeting from Supabase right now.';
     renderViews();
     return;
@@ -2158,12 +2277,32 @@ function renderCloudMeetingsState() {
     `;
   }
 
+  if (authState.actionOverridesLoading) {
+    return `
+      <section class="panel-card">
+        ${renderEmptyState('Loading cloud action updates', 'Your action statuses and due dates are being loaded from Supabase.')}
+      </section>
+    `;
+  }
+
   if (state.cloudMeetingsError) {
     return `
       <section class="panel-card">
         <div class="empty-state">
           <h4>Unable to load cloud meetings</h4>
           <p>${escapeHtml(state.cloudMeetingsError)}</p>
+          <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading meetings</button>
+        </div>
+      </section>
+    `;
+  }
+
+  if (state.actionOverridesError) {
+    return `
+      <section class="panel-card">
+        <div class="empty-state">
+          <h4>Unable to load cloud action updates</h4>
+          <p>${escapeHtml(state.actionOverridesError)}</p>
           <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading meetings</button>
         </div>
       </section>
@@ -2833,6 +2972,20 @@ function getActionOverride(actionId) {
   return state.actionOverrides[actionId] || null;
 }
 
+function getActionById(actionId) {
+  if (!actionId) {
+    return null;
+  }
+
+  return getCombinedActions().find((action) => action.id === actionId) || null;
+}
+
+function isDefaultActionOverride(status, dueDate) {
+  const normalizedStatus = ACTION_STATUSES.includes(status) ? status : '';
+  const normalizedDueDate = normalizeExtractedDate(dueDate || '');
+  return (!normalizedStatus || normalizedStatus === 'Open') && !normalizedDueDate;
+}
+
 function getEffectiveActionStatus(defaultStatus, override) {
   if (override && ACTION_STATUSES.includes(override.status)) {
     return override.status;
@@ -2953,8 +3106,21 @@ function filterCombinedActions(actions, selectedFilter) {
   return actions.filter((action) => action.status === selectedFilter);
 }
 
-function updateActionOverride(actionId, update) {
+async function updateActionOverride(actionId, update) {
   if (!actionId) {
+    return;
+  }
+
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.actionOverridesError = 'You must be signed in to save action updates.';
+    renderViews();
+    return;
+  }
+
+  const sourceAction = getActionById(actionId);
+  if (!sourceAction || !sourceAction.sourceMeetingId) {
+    state.actionOverridesError = 'The selected action could not be matched to a cloud meeting.';
+    renderViews();
     return;
   }
 
@@ -2973,19 +3139,56 @@ function updateActionOverride(actionId, update) {
     nextOverride.dueDate = normalizeExtractedDate(update.dueDate || '');
   }
 
-  const shouldDelete = !nextOverride.status && !nextOverride.dueDate;
-  const nextOverrides = { ...state.actionOverrides };
-  if (shouldDelete) {
-    delete nextOverrides[actionId];
-  } else {
-    nextOverrides[actionId] = nextOverride;
-  }
+  state.actionOverridesError = '';
 
-  const stored = writeStoredActionOverrides(nextOverrides);
-  if (!stored) {
+  if (isDefaultActionOverride(nextOverride.status, nextOverride.dueDate)) {
+    const { error } = await supabaseClient
+      .from('action_overrides')
+      .delete()
+      .eq('id', getActionOverrideDatabaseId(authState.user.id, actionId))
+      .eq('user_id', authState.user.id);
+
+    if (error) {
+      state.actionOverridesError = 'Unable to save action updates to Supabase right now.';
+      renderViews();
+      return;
+    }
+
+    const nextOverrides = { ...state.actionOverrides };
+    delete nextOverrides[actionId];
+    state.actionOverrides = nextOverrides;
+    renderViews();
     return;
   }
 
+  const row = mapActionOverrideToDatabaseRow(nextOverride, authState.user.id, sourceAction.sourceMeetingId);
+  if (!row) {
+    state.actionOverridesError = 'The action update was invalid and could not be saved.';
+    renderViews();
+    return;
+  }
+
+  const { data, error } = await supabaseClient
+    .from('action_overrides')
+    .upsert(row, { onConflict: 'id' })
+    .select(ACTION_OVERRIDE_ROW_COLUMNS)
+    .single();
+
+  if (error || !data) {
+    state.actionOverridesError = 'Unable to save action updates to Supabase right now.';
+    renderViews();
+    return;
+  }
+
+  const savedOverride = mapActionOverrideRowToOverride(data);
+  if (!savedOverride) {
+    state.actionOverridesError = 'Supabase returned an invalid action update row.';
+    renderViews();
+    return;
+  }
+
+  const nextOverrides = { ...state.actionOverrides };
+  nextOverrides[actionId] = savedOverride;
   state.actionOverrides = nextOverrides;
   renderViews();
 }
@@ -4053,6 +4256,9 @@ function renderActions() {
   const combinedActions = sortCombinedActions(getCombinedActions());
   const selectedFilter = ACTION_FILTERS.includes(state.actionFilter) ? state.actionFilter : 'All';
   const visibleActions = filterCombinedActions(combinedActions, selectedFilter);
+  const errorMessage = state.actionOverridesError
+    ? `<p class="import-error" role="alert">${escapeHtml(state.actionOverridesError)}</p>`
+    : '';
   const list = visibleActions.length
     ? visibleActions.map((action) => renderActionCard(action, { editable: true, returnSection: 'actions' })).join('')
     : renderEmptyState('No actions match this filter', 'Try a different status filter or import another meeting.', 'Go to Import Transcript');
@@ -4073,6 +4279,7 @@ function renderActions() {
           <select id="actions-filter" class="sort-select js-actions-filter">${filterOptions}</select>
         </div>
       </div>
+        ${errorMessage}
       <div class="action-list">${list}</div>
     </section>
   `;
@@ -4147,8 +4354,9 @@ function handleExportBackup() {
 }
 
 function resetStateAfterDataReplacement() {
-  state.actionOverrides = readStoredActionOverrides();
   state.savedSettings = readStoredSettings();
+  state.migrationArchiveAvailable = false;
+  state.overrideMigrationArchiveAvailable = false;
   state.selectedMeetingId = null;
   state.meetingEditMode = false;
   state.meetingEditDraft = null;
@@ -4270,6 +4478,8 @@ function renderDataManagement() {
   const isAdmin = isCurrentUserAdmin();
   const localStagedMeetings = getLocalStagedMeetings();
   const localStagedCount = localStagedMeetings.length;
+  const localStagedActionOverrides = Object.values(getLocalStagedActionOverrides() || {});
+  const localStagedActionOverrideCount = localStagedActionOverrides.length;
   const errorMessage = state.dataManagementError
     ? `<p class="import-error" role="alert">${escapeHtml(state.dataManagementError)}</p>`
     : '';
@@ -4293,6 +4503,17 @@ function renderDataManagement() {
       </div>
     `
     : '';
+  const cloudActionOverridesMessage = state.actionOverridesError
+    ? `
+      <div class="import-preview-panel">
+        <div class="section-heading">
+          <h4>Cloud action updates unavailable</h4>
+        </div>
+        <p class="entity-meta">${escapeHtml(state.actionOverridesError)}</p>
+        <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading action updates</button>
+      </div>
+    `
+    : '';
   const migrationNotice = state.cloudMeetingsLoaded && localStagedCount
     ? `
       <div class="import-preview-panel">
@@ -4304,6 +4525,21 @@ function renderDataManagement() {
         <div class="data-management-actions">
           <button class="primary-button js-import-local-meetings" type="button" ${state.migrationInProgress ? 'disabled' : ''}>${state.migrationInProgress ? 'Importing...' : 'Import Local Meetings to Supabase'}</button>
           ${state.migrationArchiveAvailable ? '<button class="secondary-button js-archive-local-meetings" type="button">Archive Local Meeting Copy</button>' : ''}
+        </div>
+      </div>
+    `
+    : '';
+  const actionOverrideMigrationNotice = authState.actionOverridesLoaded && localStagedActionOverrideCount
+    ? `
+      <div class="import-preview-panel">
+        <div class="section-heading">
+          <h4>Local action update staging</h4>
+        </div>
+        <p class="entity-meta">Local action updates were found in this browser.</p>
+        <p class="entity-meta">${localStagedActionOverrideCount} local action updates are available for migration. Existing cloud rows will be preserved, matching action ids will be updated, and invalid or orphaned overrides will be skipped.</p>
+        <div class="data-management-actions">
+          <button class="primary-button js-import-local-action-overrides" type="button" ${state.overrideMigrationInProgress ? 'disabled' : ''}>${state.overrideMigrationInProgress ? 'Importing...' : 'Import Local Action Updates to Supabase'}</button>
+          ${state.overrideMigrationArchiveAvailable ? '<button class="secondary-button js-archive-local-action-overrides" type="button">Archive Local Action Update Copy</button>' : ''}
         </div>
       </div>
     `
@@ -4331,11 +4567,13 @@ function renderDataManagement() {
       <p class="import-description">Use backup export before making large changes. Restore writes only to local migration staging in this browser.</p>
       <p class="entity-meta">${escapeHtml(roleMessage)}</p>
       ${cloudMessage}
+      ${cloudActionOverridesMessage}
       ${migrationNotice}
+      ${actionOverrideMigrationNotice}
 
       <div class="panel-card data-management-stats">
         <p><strong>Cloud meetings loaded:</strong> ${meetingCount}</p>
-        <p><strong>Action overrides:</strong> ${actionOverrideCount}</p>
+        <p><strong>Cloud action overrides:</strong> ${actionOverrideCount}</p>
         <p><strong>Approximate backup size:</strong> ${escapeHtml(backupSizeLabel)}</p>
         <p><strong>Latest export this session:</strong> ${escapeHtml(latestExportLabel)}</p>
       </div>
@@ -4347,7 +4585,7 @@ function renderDataManagement() {
         <div class="section-heading">
           <h4>Export backup</h4>
         </div>
-        <p class="entity-meta">Downloads currently loaded cloud meetings, local action overrides, and settings as a JSON backup file.</p>
+        <p class="entity-meta">Downloads currently loaded cloud meetings, current cloud action overrides, and settings as a JSON backup file.</p>
         <button class="primary-button js-export-backup" type="button">Export Backup</button>
       </div>
 
@@ -4895,6 +5133,143 @@ function handleArchiveLocalMeetingCopy() {
   renderViews();
 }
 
+function getCloudActionOverrideMigrationReport(result) {
+  return `Inserted ${result.inserted}, updated ${result.updated}, skipped ${result.skipped}, failed ${result.failed}.`;
+}
+
+async function handleImportLocalActionUpdatesToSupabase() {
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.dataManagementError = 'You must be signed in to import local action updates.';
+    renderViews();
+    return;
+  }
+
+  const localOverridesById = getLocalStagedActionOverrides();
+  const localOverrides = Object.values(localOverridesById || {});
+  if (!localOverrides.length) {
+    state.dataManagementError = 'No local action updates were found in this browser.';
+    renderViews();
+    return;
+  }
+
+  const confirmed = window.confirm([
+    `Import ${localOverrides.length} local action updates to Supabase?`,
+    '',
+    'Existing cloud rows will be preserved.',
+    'Matching action ids will be updated.',
+    'Invalid or orphaned action updates will be skipped.'
+  ].join('\n'));
+
+  if (!confirmed) {
+    return;
+  }
+
+  clearDataManagementMessages();
+  state.overrideMigrationInProgress = true;
+  renderViews();
+
+  const actionsById = getCombinedActions().reduce((accumulator, action) => {
+    accumulator[action.id] = action;
+    return accumulator;
+  }, {});
+
+  const report = {
+    inserted: 0,
+    updated: 0,
+    skipped: 0,
+    failed: 0
+  };
+  const nextOverrides = { ...state.actionOverrides };
+
+  for (const localOverride of localOverrides) {
+    const sanitizedOverride = sanitizeActionOverrideRecord(localOverride);
+    if (!sanitizedOverride) {
+      report.skipped += 1;
+      continue;
+    }
+
+    const sourceAction = actionsById[sanitizedOverride.actionId];
+    if (!sourceAction || !sourceAction.sourceMeetingId) {
+      report.skipped += 1;
+      continue;
+    }
+
+    const row = mapActionOverrideToDatabaseRow(sanitizedOverride, authState.user.id, sourceAction.sourceMeetingId);
+    if (!row) {
+      report.skipped += 1;
+      continue;
+    }
+
+    const hadExistingOverride = Boolean(state.actionOverrides[sanitizedOverride.actionId]);
+    const { data, error } = await supabaseClient
+      .from('action_overrides')
+      .upsert(row, { onConflict: 'id' })
+      .select(ACTION_OVERRIDE_ROW_COLUMNS)
+      .single();
+
+    if (error || !data) {
+      report.failed += 1;
+      continue;
+    }
+
+    const savedOverride = mapActionOverrideRowToOverride(data);
+    if (!savedOverride) {
+      report.failed += 1;
+      continue;
+    }
+
+    nextOverrides[savedOverride.actionId] = savedOverride;
+    if (hadExistingOverride) {
+      report.updated += 1;
+    } else {
+      report.inserted += 1;
+    }
+  }
+
+  state.actionOverrides = nextOverrides;
+  state.overrideMigrationInProgress = false;
+  state.overrideMigrationArchiveAvailable = report.failed === 0 && (report.inserted > 0 || report.updated > 0 || report.skipped > 0);
+  state.dataManagementSuccess = `Local action update migration completed. ${getCloudActionOverrideMigrationReport(report)}`;
+  state.dataManagementError = report.failed > 0 ? 'Some local action updates could not be imported to Supabase.' : '';
+  renderViews();
+}
+
+function handleArchiveLocalActionUpdateCopy() {
+  const localOverrides = Object.values(getLocalStagedActionOverrides() || {});
+  if (!localOverrides.length) {
+    state.dataManagementError = 'No local action update copy is available to archive.';
+    renderViews();
+    return;
+  }
+
+  const confirmed = window.confirm(
+    'Archive the local action update copy?\n\nA backup will be exported first. This removes only local staged action overrides from this browser.'
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const payload = buildBackupPayload();
+  const exported = triggerBackupDownload(payload);
+  if (!exported) {
+    state.dataManagementError = 'Unable to export a backup before archiving the local action update copy.';
+    renderViews();
+    return;
+  }
+
+  if (typeof window === 'undefined' || !window.localStorage) {
+    state.dataManagementError = 'Browser storage is not available for archiving the local action update copy.';
+    renderViews();
+    return;
+  }
+
+  window.localStorage.removeItem(ACTION_OVERRIDES_STORAGE_KEY);
+  state.overrideMigrationArchiveAvailable = false;
+  state.dataManagementLastExportAt = payload.exportedAt;
+  state.dataManagementSuccess = 'The local action update copy was archived after exporting a backup.';
+  renderViews();
+}
+
 function attachInteractions() {
   document.querySelectorAll('.js-open-customer-detail').forEach((button) => {
     button.addEventListener('click', () => {
@@ -5195,6 +5570,8 @@ function attachInteractions() {
   const retryCloudMeetingsButtons = document.querySelectorAll('.js-retry-cloud-meetings');
   const importLocalMeetingsButton = document.querySelector('.js-import-local-meetings');
   const archiveLocalMeetingsButton = document.querySelector('.js-archive-local-meetings');
+  const importLocalActionOverridesButton = document.querySelector('.js-import-local-action-overrides');
+  const archiveLocalActionOverridesButton = document.querySelector('.js-archive-local-action-overrides');
   const emptyImportButtons = document.querySelectorAll('.js-go-import');
 
   if (selectRestoreFileButton && restoreBackupInput) {
@@ -5247,6 +5624,18 @@ function attachInteractions() {
   if (archiveLocalMeetingsButton) {
     archiveLocalMeetingsButton.addEventListener('click', () => {
       handleArchiveLocalMeetingCopy();
+    });
+  }
+
+  if (importLocalActionOverridesButton) {
+    importLocalActionOverridesButton.addEventListener('click', () => {
+      handleImportLocalActionUpdatesToSupabase();
+    });
+  }
+
+  if (archiveLocalActionOverridesButton) {
+    archiveLocalActionOverridesButton.addEventListener('click', () => {
+      handleArchiveLocalActionUpdateCopy();
     });
   }
 
