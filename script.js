@@ -14,10 +14,17 @@ const BACKUP_APP_NAME = 'Tasklet Transcript App';
 const BACKUP_VERSION = 1;
 const ACTION_STATUSES = ['Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled'];
 const ACTION_FILTERS = ['All', 'Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled', 'Overdue', 'No due date'];
+const SORT_ORDER_OPTIONS = ['newest', 'oldest'];
+const SUPPORTED_APPLICATION_SETTING_KEYS = ['sortOrder', 'actionFilter'];
+const APPLICATION_SETTING_LABELS = {
+  sortOrder: 'Meeting sort order',
+  actionFilter: 'Action filter'
+};
 const SEARCH_MIN_CHARS = 2;
 const SEARCH_DEBOUNCE_MS = 180;
 const AUTH_ERROR_MESSAGE = 'Unable to sign in. Check your email and password and try again.';
 const SUPPORTED_PROFILE_ROLES = ['admin', 'user'];
+const USER_SETTINGS_ROW_COLUMNS = ['user_id', 'settings', 'created_at', 'updated_at'].join(', ');
 const ACTION_OVERRIDE_ROW_COLUMNS = [
   'id',
   'user_id',
@@ -60,6 +67,7 @@ let authFormBound = false;
 let authProfileLoadToken = 0;
 let cloudMeetingsLoadToken = 0;
 let cloudActionOverridesLoadToken = 0;
+let cloudSettingsLoadToken = 0;
 
 const authState = {
   checking: true,
@@ -73,6 +81,9 @@ const authState = {
   actionOverridesLoading: false,
   actionOverridesLoadError: '',
   actionOverridesLoaded: false,
+  settingsLoading: false,
+  settingsLoadError: '',
+  settingsLoaded: false,
   error: '',
   status: 'Checking session...'
 };
@@ -237,7 +248,10 @@ function updateAuthView() {
   const { authView, status, error } = getAuthElements();
 
   if (authView) {
-    authView.hidden = Boolean(authState.user) && !authState.meetingsLoading && !authState.actionOverridesLoading;
+    authView.hidden = Boolean(authState.user)
+      && !authState.meetingsLoading
+      && !authState.actionOverridesLoading
+      && !authState.settingsLoading;
   }
 
   if (status) {
@@ -274,6 +288,159 @@ function clearCloudActionOverrideState() {
   authState.actionOverridesLoaded = false;
   state.overrideMigrationInProgress = false;
   state.overrideMigrationArchiveAvailable = false;
+}
+
+function getDefaultApplicationSettings() {
+  return {
+    sortOrder: 'newest',
+    actionFilter: 'All'
+  };
+}
+
+function sanitizeApplicationSettings(value) {
+  const source = isPlainObject(value) ? value : {};
+  const defaults = getDefaultApplicationSettings();
+  const sortOrder = SORT_ORDER_OPTIONS.includes(source.sortOrder) ? source.sortOrder : defaults.sortOrder;
+  const actionFilter = ACTION_FILTERS.includes(source.actionFilter) ? source.actionFilter : defaults.actionFilter;
+
+  return {
+    sortOrder,
+    actionFilter
+  };
+}
+
+function buildCurrentApplicationSettings() {
+  return sanitizeApplicationSettings({
+    sortOrder: state.sortOrder,
+    actionFilter: state.actionFilter
+  });
+}
+
+function applyApplicationSettings(settings) {
+  const sanitized = sanitizeApplicationSettings(settings);
+  state.sortOrder = sanitized.sortOrder;
+  state.actionFilter = sanitized.actionFilter;
+  state.savedSettings = sanitized;
+}
+
+function getLocalStagedSettingsRecord() {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return {
+      exists: false,
+      raw: null,
+      parseError: false
+    };
+  }
+
+  const rawValue = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+  if (typeof rawValue !== 'string') {
+    return {
+      exists: false,
+      raw: null,
+      parseError: false
+    };
+  }
+
+  try {
+    const parsedValue = JSON.parse(rawValue);
+    return {
+      exists: true,
+      raw: isPlainObject(parsedValue) ? parsedValue : {},
+      parseError: !isPlainObject(parsedValue)
+    };
+  } catch (error) {
+    return {
+      exists: true,
+      raw: {},
+      parseError: true
+    };
+  }
+}
+
+function getDetectedSupportedSettingKeys(rawSettings) {
+  if (!isPlainObject(rawSettings)) {
+    return [];
+  }
+
+  const detected = [];
+  if (Object.prototype.hasOwnProperty.call(rawSettings, 'sortOrder') && SORT_ORDER_OPTIONS.includes(rawSettings.sortOrder)) {
+    detected.push('sortOrder');
+  }
+  if (Object.prototype.hasOwnProperty.call(rawSettings, 'actionFilter') && ACTION_FILTERS.includes(rawSettings.actionFilter)) {
+    detected.push('actionFilter');
+  }
+
+  return detected;
+}
+
+function getDetectedSupportedSettingLabels(rawSettings) {
+  return getDetectedSupportedSettingKeys(rawSettings).map((key) => APPLICATION_SETTING_LABELS[key] || key);
+}
+
+function mapUserSettingsRowToSettings(row) {
+  if (!row || typeof row !== 'object') {
+    return getDefaultApplicationSettings();
+  }
+
+  return sanitizeApplicationSettings(row.settings);
+}
+
+function clearCloudSettingsState() {
+  applyApplicationSettings(getDefaultApplicationSettings());
+  state.cloudSettingsError = '';
+  state.settingsSaveInProgress = false;
+  state.settingsMigrationInProgress = false;
+  state.settingsMigrationArchiveAvailable = false;
+  authState.settingsLoading = false;
+  authState.settingsLoadError = '';
+  authState.settingsLoaded = false;
+}
+
+async function loadAuthenticatedSettings() {
+  const loadToken = ++cloudSettingsLoadToken;
+
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    clearCloudSettingsState();
+    return { success: false, error: 'No authenticated user is available for settings loading.' };
+  }
+
+  authState.settingsLoading = true;
+  authState.settingsLoadError = '';
+  authState.settingsLoaded = false;
+  state.cloudSettingsError = '';
+
+  const { data, error } = await supabaseClient
+    .from('user_settings')
+    .select(USER_SETTINGS_ROW_COLUMNS)
+    .eq('user_id', authState.user.id)
+    .maybeSingle();
+
+  if (loadToken !== cloudSettingsLoadToken) {
+    return { success: false, error: 'Settings loading was superseded by a newer session state.' };
+  }
+
+  authState.settingsLoading = false;
+
+  if (error) {
+    authState.settingsLoaded = false;
+    authState.settingsLoadError = 'Unable to load cloud settings. Please try again.';
+    state.cloudSettingsError = authState.settingsLoadError;
+    return { success: false, error: authState.settingsLoadError };
+  }
+
+  if (!data) {
+    applyApplicationSettings(getDefaultApplicationSettings());
+    authState.settingsLoaded = true;
+    authState.settingsLoadError = '';
+    state.cloudSettingsError = '';
+    return { success: true };
+  }
+
+  applyApplicationSettings(mapUserSettingsRowToSettings(data));
+  authState.settingsLoaded = true;
+  authState.settingsLoadError = '';
+  state.cloudSettingsError = '';
+  return { success: true };
 }
 
 async function loadAuthenticatedMeetings() {
@@ -374,7 +541,12 @@ async function loadAuthenticatedCloudData() {
     return meetingsResult;
   }
 
-  return loadAuthenticatedActionOverrides();
+  const actionOverridesResult = await loadAuthenticatedActionOverrides();
+  if (!actionOverridesResult.success) {
+    return actionOverridesResult;
+  }
+
+  return loadAuthenticatedSettings();
 }
 
 async function handleRetryCloudMeetings() {
@@ -385,6 +557,7 @@ async function handleRetryCloudMeetings() {
   authState.status = 'Retrying cloud data...';
   await loadAuthenticatedCloudData();
   authState.status = '';
+  updateAuthView();
   renderViews();
 }
 
@@ -428,6 +601,7 @@ async function setAppAuthenticated(user) {
   const profileLoadToken = ++authProfileLoadToken;
   ++cloudMeetingsLoadToken;
   ++cloudActionOverridesLoadToken;
+  ++cloudSettingsLoadToken;
 
   if (appShell) {
     appShell.hidden = true;
@@ -438,6 +612,7 @@ async function setAppAuthenticated(user) {
   authState.signingIn = false;
   clearCloudMeetingState();
   clearCloudActionOverrideState();
+  clearCloudSettingsState();
 
   if (!authState.user) {
     clearAuthenticatedProfileState();
@@ -1520,21 +1695,12 @@ function writeStoredMeetings(meetings) {
 }
 
 function readStoredSettings() {
-  if (typeof window === 'undefined' || !window.localStorage) {
+  const stagedRecord = getLocalStagedSettingsRecord();
+  if (!stagedRecord.exists) {
     return {};
   }
 
-  try {
-    const rawValue = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
-    if (!rawValue) {
-      return {};
-    }
-
-    const parsedValue = JSON.parse(rawValue);
-    return isPlainObject(parsedValue) ? parsedValue : {};
-  } catch (error) {
-    return {};
-  }
+  return sanitizeApplicationSettings(stagedRecord.raw);
 }
 
 function getStorageSnapshot(keys) {
@@ -1611,7 +1777,7 @@ function buildBackupPayload() {
     data: {
       meetings: [...state.savedMeetings].map(normalizeMeetingRecord),
       actionOverrides: getNormalizedActionOverridesArray(state.actionOverrides),
-      settings: readStoredSettings()
+      settings: buildCurrentApplicationSettings()
     }
   };
 }
@@ -1652,7 +1818,7 @@ function validateBackupPayload(payload) {
     data: {
       meetings: meetings.map((meeting) => normalizeMeetingRecord(meeting)),
       actionOverrides: getNormalizedActionOverridesArray(actionOverrides),
-      settings: isPlainObject(settings) ? settings : {}
+      settings: typeof settings === 'undefined' ? {} : sanitizeApplicationSettings(settings)
     }
   };
 }
@@ -1766,10 +1932,14 @@ const state = {
   searchActiveIndex: -1,
   searchHighlightedActionId: '',
   savedMeetings: [],
-  savedSettings: readStoredSettings(),
+  savedSettings: getDefaultApplicationSettings(),
   cloudMeetingsError: '',
   cloudMeetingsLoaded: false,
   actionOverridesError: '',
+  cloudSettingsError: '',
+  settingsSaveInProgress: false,
+  settingsMigrationInProgress: false,
+  settingsMigrationArchiveAvailable: false,
   overrideMigrationInProgress: false,
   overrideMigrationArchiveAvailable: false,
   migrationInProgress: false,
@@ -2285,13 +2455,21 @@ function renderCloudMeetingsState() {
     `;
   }
 
+  if (authState.settingsLoading) {
+    return `
+      <section class="panel-card">
+        ${renderEmptyState('Loading cloud settings', 'Your application settings are being loaded from Supabase.')}
+      </section>
+    `;
+  }
+
   if (state.cloudMeetingsError) {
     return `
       <section class="panel-card">
         <div class="empty-state">
           <h4>Unable to load cloud meetings</h4>
           <p>${escapeHtml(state.cloudMeetingsError)}</p>
-          <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading meetings</button>
+          <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading cloud data</button>
         </div>
       </section>
     `;
@@ -2303,7 +2481,19 @@ function renderCloudMeetingsState() {
         <div class="empty-state">
           <h4>Unable to load cloud action updates</h4>
           <p>${escapeHtml(state.actionOverridesError)}</p>
-          <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading meetings</button>
+          <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading cloud data</button>
+        </div>
+      </section>
+    `;
+  }
+
+  if (state.cloudSettingsError) {
+    return `
+      <section class="panel-card">
+        <div class="empty-state">
+          <h4>Unable to load cloud settings</h4>
+          <p>${escapeHtml(state.cloudSettingsError)}</p>
+          <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading cloud data</button>
         </div>
       </section>
     `;
@@ -3104,6 +3294,76 @@ function filterCombinedActions(actions, selectedFilter) {
   }
 
   return actions.filter((action) => action.status === selectedFilter);
+}
+
+async function saveApplicationSettingsToSupabase(nextSettings) {
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    return {
+      success: false,
+      error: 'You must be signed in to save application settings.'
+    };
+  }
+
+  const sanitizedSettings = sanitizeApplicationSettings(nextSettings);
+  const row = {
+    user_id: authState.user.id,
+    settings: sanitizedSettings,
+    updated_at: new Date().toISOString()
+  };
+
+  const { data, error } = await supabaseClient
+    .from('user_settings')
+    .upsert(row, { onConflict: 'user_id' })
+    .select(USER_SETTINGS_ROW_COLUMNS)
+    .single();
+
+  if (error || !data) {
+    return {
+      success: false,
+      error: 'Unable to save cloud settings right now. Your previous setting is still active.'
+    };
+  }
+
+  return {
+    success: true,
+    settings: mapUserSettingsRowToSettings(data)
+  };
+}
+
+async function updateSingleApplicationSetting(settingKey, nextValue) {
+  if (!SUPPORTED_APPLICATION_SETTING_KEYS.includes(settingKey)) {
+    return {
+      success: false,
+      error: 'This setting is not supported.'
+    };
+  }
+
+  const currentSettings = buildCurrentApplicationSettings();
+  const candidateSettings = sanitizeApplicationSettings({
+    ...currentSettings,
+    [settingKey]: nextValue
+  });
+
+  if (candidateSettings[settingKey] === currentSettings[settingKey]) {
+    return {
+      success: true,
+      settings: currentSettings
+    };
+  }
+
+  state.settingsSaveInProgress = true;
+  const saveResult = await saveApplicationSettingsToSupabase(candidateSettings);
+  state.settingsSaveInProgress = false;
+
+  if (!saveResult.success) {
+    return saveResult;
+  }
+
+  applyApplicationSettings(saveResult.settings);
+  return {
+    success: true,
+    settings: saveResult.settings
+  };
 }
 
 async function updateActionOverride(actionId, update) {
@@ -4354,9 +4614,9 @@ function handleExportBackup() {
 }
 
 function resetStateAfterDataReplacement() {
-  state.savedSettings = readStoredSettings();
   state.migrationArchiveAvailable = false;
   state.overrideMigrationArchiveAvailable = false;
+  state.settingsMigrationArchiveAvailable = false;
   state.selectedMeetingId = null;
   state.meetingEditMode = false;
   state.meetingEditDraft = null;
@@ -4417,6 +4677,10 @@ async function handleRestoreBackup() {
     return;
   }
 
+  if (typeof window !== 'undefined' && window.localStorage) {
+    window.localStorage.removeItem(SETTINGS_STORAGE_KEY);
+  }
+
   resetStateAfterDataReplacement();
   state.dataManagementSelectedBackupFile = null;
   state.dataManagementSelectedBackupName = '';
@@ -4435,7 +4699,8 @@ function handleClearAllLocalData() {
 
   const warningConfirmed = window.confirm(
     'Clear all local data?\\n\\n'
-      + 'This removes all saved meetings and action overrides from this browser and resets app settings.'
+      + 'This removes only local migration staging data in this browser (meetings, action overrides, and settings).\\n'
+      + 'Cloud meetings, cloud action updates, and cloud settings in Supabase are not deleted.'
   );
 
   if (!warningConfirmed) {
@@ -4466,13 +4731,14 @@ function handleClearAllLocalData() {
   resetStateAfterDataReplacement();
   state.dataManagementSelectedBackupFile = null;
   state.dataManagementSelectedBackupName = '';
-  state.dataManagementSuccess = 'All local browser data has been cleared.';
+  state.dataManagementSuccess = 'All local migration staging data has been cleared from this browser.';
   renderViews();
 }
 
 function renderDataManagement() {
   const meetingCount = state.savedMeetings.length;
   const actionOverrideCount = Object.keys(state.actionOverrides || {}).length;
+  const cloudSettings = buildCurrentApplicationSettings();
   const backupSizeLabel = getBackupSizeLabel();
   const latestExportLabel = formatDateTime(state.dataManagementLastExportAt);
   const isAdmin = isCurrentUserAdmin();
@@ -4480,6 +4746,9 @@ function renderDataManagement() {
   const localStagedCount = localStagedMeetings.length;
   const localStagedActionOverrides = Object.values(getLocalStagedActionOverrides() || {});
   const localStagedActionOverrideCount = localStagedActionOverrides.length;
+  const localStagedSettingsRecord = getLocalStagedSettingsRecord();
+  const localStagedSettingsCount = localStagedSettingsRecord.exists ? 1 : 0;
+  const detectedSettingLabels = getDetectedSupportedSettingLabels(localStagedSettingsRecord.raw);
   const errorMessage = state.dataManagementError
     ? `<p class="import-error" role="alert">${escapeHtml(state.dataManagementError)}</p>`
     : '';
@@ -4490,8 +4759,8 @@ function renderDataManagement() {
     ? `<p class="entity-meta">Selected file: ${escapeHtml(state.dataManagementSelectedBackupName)}</p>`
     : '<p class="entity-meta">No backup file selected.</p>';
   const roleMessage = isAdmin
-    ? 'Administrators can export, restore, and clear local application data.'
-    : 'You can export and restore your local application data. Clearing all data is restricted to administrators.';
+    ? 'Administrators can export, restore, and clear local migration staging data.'
+    : 'You can export and restore local migration staging data. Clearing all local staging data is restricted to administrators.';
   const cloudMessage = state.cloudMeetingsError
     ? `
       <div class="import-preview-panel">
@@ -4499,7 +4768,7 @@ function renderDataManagement() {
           <h4>Cloud meetings unavailable</h4>
         </div>
         <p class="entity-meta">${escapeHtml(state.cloudMeetingsError)}</p>
-        <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading meetings</button>
+        <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading cloud data</button>
       </div>
     `
     : '';
@@ -4510,7 +4779,18 @@ function renderDataManagement() {
           <h4>Cloud action updates unavailable</h4>
         </div>
         <p class="entity-meta">${escapeHtml(state.actionOverridesError)}</p>
-        <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading action updates</button>
+        <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading cloud data</button>
+      </div>
+    `
+    : '';
+  const cloudSettingsMessage = state.cloudSettingsError
+    ? `
+      <div class="import-preview-panel">
+        <div class="section-heading">
+          <h4>Cloud settings unavailable</h4>
+        </div>
+        <p class="entity-meta">${escapeHtml(state.cloudSettingsError)}</p>
+        <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading cloud data</button>
       </div>
     `
     : '';
@@ -4544,13 +4824,29 @@ function renderDataManagement() {
       </div>
     `
     : '';
+  const settingsMigrationNotice = authState.settingsLoaded && localStagedSettingsRecord.exists
+    ? `
+      <div class="import-preview-panel">
+        <div class="section-heading">
+          <h4>Local settings staging</h4>
+        </div>
+        <p class="entity-meta">Local application settings were found in this browser.</p>
+        <p class="entity-meta">Detected supported settings: ${escapeHtml(detectedSettingLabels.length ? detectedSettingLabels.join(', ') : 'None')}</p>
+        ${localStagedSettingsRecord.parseError ? '<p class="entity-meta">The local staged settings were malformed. Unsupported fields will be ignored and defaults will be applied during migration.</p>' : ''}
+        <div class="data-management-actions">
+          <button class="primary-button js-import-local-settings" type="button" ${state.settingsMigrationInProgress ? 'disabled' : ''}>${state.settingsMigrationInProgress ? 'Importing...' : 'Import Local Settings to Supabase'}</button>
+          ${state.settingsMigrationArchiveAvailable ? '<button class="secondary-button js-archive-local-settings" type="button">Archive Local Settings Copy</button>' : ''}
+        </div>
+      </div>
+    `
+    : '';
   const clearAllPanel = isAdmin
     ? `
       <div class="import-preview-panel data-management-danger-zone">
         <div class="section-heading">
           <h4>Clear local data</h4>
         </div>
-        <p class="entity-meta">This removes all saved meetings and action overrides from this browser. Export a backup first if needed.</p>
+        <p class="entity-meta">This removes only local migration staging data in this browser (meetings, action overrides, settings). Cloud data in Supabase is not deleted.</p>
         <button class="secondary-button data-management-danger-button js-clear-all-local-data" type="button">Clear All Local Data</button>
       </div>
     `
@@ -4568,12 +4864,16 @@ function renderDataManagement() {
       <p class="entity-meta">${escapeHtml(roleMessage)}</p>
       ${cloudMessage}
       ${cloudActionOverridesMessage}
+      ${cloudSettingsMessage}
       ${migrationNotice}
       ${actionOverrideMigrationNotice}
+      ${settingsMigrationNotice}
 
       <div class="panel-card data-management-stats">
         <p><strong>Cloud meetings loaded:</strong> ${meetingCount}</p>
         <p><strong>Cloud action overrides:</strong> ${actionOverrideCount}</p>
+        <p><strong>Cloud settings loaded:</strong> ${escapeHtml(JSON.stringify(cloudSettings))}</p>
+        <p><strong>Local staged settings copies:</strong> ${localStagedSettingsCount}</p>
         <p><strong>Approximate backup size:</strong> ${escapeHtml(backupSizeLabel)}</p>
         <p><strong>Latest export this session:</strong> ${escapeHtml(latestExportLabel)}</p>
       </div>
@@ -4585,7 +4885,7 @@ function renderDataManagement() {
         <div class="section-heading">
           <h4>Export backup</h4>
         </div>
-        <p class="entity-meta">Downloads currently loaded cloud meetings, current cloud action overrides, and settings as a JSON backup file.</p>
+        <p class="entity-meta">Downloads currently loaded cloud meetings, current cloud action overrides, and current cloud settings as a JSON backup file.</p>
         <button class="primary-button js-export-backup" type="button">Export Backup</button>
       </div>
 
@@ -5270,6 +5570,90 @@ function handleArchiveLocalActionUpdateCopy() {
   renderViews();
 }
 
+async function handleImportLocalSettingsToSupabase() {
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.dataManagementError = 'You must be signed in to import local settings.';
+    renderViews();
+    return;
+  }
+
+  const localSettingsRecord = getLocalStagedSettingsRecord();
+  if (!localSettingsRecord.exists) {
+    state.dataManagementError = 'No local staged settings were found in this browser.';
+    renderViews();
+    return;
+  }
+
+  const detectedSettingLabels = getDetectedSupportedSettingLabels(localSettingsRecord.raw);
+  const sanitizedSettings = sanitizeApplicationSettings(localSettingsRecord.raw);
+  const confirmed = window.confirm([
+    'Import local settings to Supabase?',
+    '',
+    'This will replace the current cloud settings for your user with local staged settings.',
+    `Detected supported settings: ${detectedSettingLabels.length ? detectedSettingLabels.join(', ') : 'None'}`,
+    'Unsupported or malformed fields will be ignored and defaults will be applied.'
+  ].join('\n'));
+
+  if (!confirmed) {
+    return;
+  }
+
+  clearDataManagementMessages();
+  state.settingsMigrationInProgress = true;
+  renderViews();
+
+  const saveResult = await saveApplicationSettingsToSupabase(sanitizedSettings);
+  state.settingsMigrationInProgress = false;
+
+  if (!saveResult.success) {
+    state.dataManagementError = `${saveResult.error} Local settings migration failed and cloud settings were not changed.`;
+    renderViews();
+    return;
+  }
+
+  applyApplicationSettings(saveResult.settings);
+  state.settingsMigrationArchiveAvailable = true;
+  state.dataManagementSuccess = 'Local settings migration completed. Cloud settings were replaced with sanitized local staged settings.';
+  state.dataManagementError = '';
+  renderViews();
+}
+
+function handleArchiveLocalSettingsCopy() {
+  const localSettingsRecord = getLocalStagedSettingsRecord();
+  if (!localSettingsRecord.exists) {
+    state.dataManagementError = 'No local settings copy is available to archive.';
+    renderViews();
+    return;
+  }
+
+  const confirmed = window.confirm(
+    'Archive the local settings copy?\n\nA backup will be exported first. This removes only taskletTranscriptApp.settings from this browser.'
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const payload = buildBackupPayload();
+  const exported = triggerBackupDownload(payload);
+  if (!exported) {
+    state.dataManagementError = 'Unable to export a backup before archiving the local settings copy.';
+    renderViews();
+    return;
+  }
+
+  if (typeof window === 'undefined' || !window.localStorage) {
+    state.dataManagementError = 'Browser storage is not available for archiving the local settings copy.';
+    renderViews();
+    return;
+  }
+
+  window.localStorage.removeItem(SETTINGS_STORAGE_KEY);
+  state.settingsMigrationArchiveAvailable = false;
+  state.dataManagementLastExportAt = payload.exportedAt;
+  state.dataManagementSuccess = 'The local settings copy was archived after exporting a backup.';
+  renderViews();
+}
+
 function attachInteractions() {
   document.querySelectorAll('.js-open-customer-detail').forEach((button) => {
     button.addEventListener('click', () => {
@@ -5465,9 +5849,16 @@ function attachInteractions() {
   const actionsFilter = document.querySelector('.js-actions-filter');
   if (actionsFilter) {
     actionsFilter.value = state.actionFilter;
-    actionsFilter.addEventListener('change', (event) => {
+    actionsFilter.disabled = state.settingsSaveInProgress;
+    actionsFilter.addEventListener('change', async (event) => {
       const selectedFilter = ACTION_FILTERS.includes(event.target.value) ? event.target.value : 'All';
-      state.actionFilter = selectedFilter;
+      const previousFilter = state.actionFilter;
+      event.target.disabled = true;
+      const saveResult = await updateSingleApplicationSetting('actionFilter', selectedFilter);
+      if (!saveResult.success) {
+        event.target.value = previousFilter;
+        window.alert(saveResult.error);
+      }
       renderViews();
     });
   }
@@ -5556,8 +5947,16 @@ function attachInteractions() {
   const sortSelect = document.getElementById('meeting-sort-order');
   if (sortSelect) {
     sortSelect.value = state.sortOrder;
-    sortSelect.addEventListener('change', (event) => {
-      state.sortOrder = event.target.value;
+    sortSelect.disabled = state.settingsSaveInProgress;
+    sortSelect.addEventListener('change', async (event) => {
+      const nextSortOrder = SORT_ORDER_OPTIONS.includes(event.target.value) ? event.target.value : 'newest';
+      const previousSortOrder = state.sortOrder;
+      event.target.disabled = true;
+      const saveResult = await updateSingleApplicationSetting('sortOrder', nextSortOrder);
+      if (!saveResult.success) {
+        event.target.value = previousSortOrder;
+        window.alert(saveResult.error);
+      }
       renderViews();
     });
   }
@@ -5572,6 +5971,8 @@ function attachInteractions() {
   const archiveLocalMeetingsButton = document.querySelector('.js-archive-local-meetings');
   const importLocalActionOverridesButton = document.querySelector('.js-import-local-action-overrides');
   const archiveLocalActionOverridesButton = document.querySelector('.js-archive-local-action-overrides');
+  const importLocalSettingsButton = document.querySelector('.js-import-local-settings');
+  const archiveLocalSettingsButton = document.querySelector('.js-archive-local-settings');
   const emptyImportButtons = document.querySelectorAll('.js-go-import');
 
   if (selectRestoreFileButton && restoreBackupInput) {
@@ -5636,6 +6037,18 @@ function attachInteractions() {
   if (archiveLocalActionOverridesButton) {
     archiveLocalActionOverridesButton.addEventListener('click', () => {
       handleArchiveLocalActionUpdateCopy();
+    });
+  }
+
+  if (importLocalSettingsButton) {
+    importLocalSettingsButton.addEventListener('click', () => {
+      handleImportLocalSettingsToSupabase();
+    });
+  }
+
+  if (archiveLocalSettingsButton) {
+    archiveLocalSettingsButton.addEventListener('click', () => {
+      handleArchiveLocalSettingsCopy();
     });
   }
 
