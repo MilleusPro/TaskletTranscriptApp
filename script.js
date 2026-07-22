@@ -992,6 +992,9 @@ function updateImportSaveButtonState() {
 const state = {
   activeSection: 'dashboard',
   selectedMeetingId: null,
+  selectedCustomerKey: null,
+  selectedPartnerKey: null,
+  meetingReturnContext: null,
   activeViewerTab: 'overview',
   sortOrder: 'newest',
   searchQuery: '',
@@ -1034,6 +1037,9 @@ function init() {
     button.addEventListener('click', () => {
       state.activeSection = button.dataset.section;
       state.selectedMeetingId = null;
+      state.selectedCustomerKey = null;
+      state.selectedPartnerKey = null;
+      state.meetingReturnContext = null;
       state.activeViewerTab = 'overview';
       renderViews();
     });
@@ -1138,10 +1144,171 @@ function getVisibleMeetings() {
   });
 }
 
+function normalizeCompanyName(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getNameGroupingKey(value) {
+  return normalizeCompanyName(value).toLowerCase();
+}
+
+function getMeetingCustomerName(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return '';
+  }
+
+  const directName = normalizeCompanyName(meeting.customer);
+  if (directName) {
+    return directName;
+  }
+
+  if (meeting.customerId) {
+    const customer = getCustomerById(meeting.customerId);
+    const mappedName = customer ? normalizeCompanyName(customer.name) : '';
+    if (mappedName) {
+      return mappedName;
+    }
+  }
+
+  return '';
+}
+
+function getMeetingPartnerName(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return '';
+  }
+
+  const directName = normalizeCompanyName(meeting.partner);
+  if (directName) {
+    return directName;
+  }
+
+  if (meeting.partnerId) {
+    const partner = getPartnerById(meeting.partnerId);
+    const mappedName = partner ? normalizeCompanyName(partner.name) : '';
+    if (mappedName) {
+      return mappedName;
+    }
+  }
+
+  return '';
+}
+
+function getMeetingTimestamp(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return 0;
+  }
+
+  if (meeting.date) {
+    const dateTimestamp = new Date(`${meeting.date}T00:00:00`).getTime();
+    if (Number.isFinite(dateTimestamp)) {
+      return dateTimestamp;
+    }
+  }
+
+  const createdTimestamp = new Date(meeting.createdAt || '').getTime();
+  return Number.isFinite(createdTimestamp) ? createdTimestamp : 0;
+}
+
+function compareMeetingsNewestFirst(firstMeeting, secondMeeting) {
+  return getMeetingTimestamp(secondMeeting) - getMeetingTimestamp(firstMeeting);
+}
+
+function getMeetingOpenActionCount(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return 0;
+  }
+
+  if (Array.isArray(meeting.actionItemIds) && meeting.actionItemIds.length) {
+    return meeting.actionItemIds
+      .map((actionId) => sampleData.actions.find((entry) => entry.id === actionId))
+      .filter((action) => action && action.status !== 'Completed' && action.status !== 'Cancelled')
+      .length;
+  }
+
+  if (Array.isArray(meeting.actions)) {
+    return meeting.actions.filter((action) => typeof action === 'string' && action.trim()).length;
+  }
+
+  return 0;
+}
+
+function buildEntityGroupsFromMeetings(entityType) {
+  const groupsByKey = new Map();
+
+  getAllMeetings().forEach((meeting) => {
+    const entityName = entityType === 'customer' ? getMeetingCustomerName(meeting) : getMeetingPartnerName(meeting);
+    if (!entityName) {
+      return;
+    }
+
+    const groupingKey = getNameGroupingKey(entityName);
+    if (!groupingKey) {
+      return;
+    }
+
+    if (!groupsByKey.has(groupingKey)) {
+      groupsByKey.set(groupingKey, {
+        key: groupingKey,
+        name: entityName,
+        meetings: [],
+        relatedNames: new Set(),
+        openActions: 0
+      });
+    }
+
+    const group = groupsByKey.get(groupingKey);
+    group.meetings.push(meeting);
+    group.openActions += getMeetingOpenActionCount(meeting);
+
+    if (entityType === 'customer') {
+      const partnerName = getMeetingPartnerName(meeting);
+      if (partnerName) {
+        group.relatedNames.add(partnerName);
+      }
+    } else {
+      const customerName = getMeetingCustomerName(meeting);
+      if (customerName) {
+        group.relatedNames.add(customerName);
+      }
+    }
+  });
+
+  return Array.from(groupsByKey.values())
+    .map((group) => {
+      const sortedMeetings = [...group.meetings].sort(compareMeetingsNewestFirst);
+      return {
+        ...group,
+        meetings: sortedMeetings,
+        relatedNames: Array.from(group.relatedNames).sort((a, b) => a.localeCompare(b)),
+        latestMeetingDate: sortedMeetings.length && sortedMeetings[0].date ? sortedMeetings[0].date : ''
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function getCustomersFromMeetings() {
+  return buildEntityGroupsFromMeetings('customer');
+}
+
+function getPartnersFromMeetings() {
+  return buildEntityGroupsFromMeetings('partner');
+}
+
+function getCustomerGroupByKey(groupKey) {
+  return getCustomersFromMeetings().find((group) => group.key === groupKey) || null;
+}
+
+function getPartnerGroupByKey(groupKey) {
+  return getPartnersFromMeetings().find((group) => group.key === groupKey) || null;
+}
+
 function renderDashboard(meetings) {
   const totalMeetings = getAllMeetings().length;
-  const totalCustomers = sampleData.customers.length;
-  const totalPartners = sampleData.partners.length;
+  const totalCustomers = getCustomersFromMeetings().length;
+  const totalPartners = getPartnersFromMeetings().length;
   const openActions = sampleData.actions.filter((action) => action.status !== 'Completed' && action.status !== 'Cancelled').length;
   const recentMeetings = meetings.slice(0, 3);
   const followUps = sampleData.actions.slice(0, 3);
@@ -1222,14 +1389,17 @@ function renderMeetingsPage() {
   `;
 }
 
-function renderMeetingListItem(meeting) {
+function renderMeetingListItem(meeting, options = {}) {
   const customer = getMeetingDisplayCustomer(meeting);
   const partner = getMeetingDisplayPartner(meeting);
   const participantNames = getMeetingDisplayParticipants(meeting);
-  const openActions = sampleData.actions.filter((action) => action.sourceMeetingId === meeting.id && action.status !== 'Completed' && action.status !== 'Cancelled').length;
+  const openActions = getMeetingOpenActionCount(meeting);
+  const returnAttributes = options.returnSection && options.returnKey
+    ? ` data-return-section="${escapeHtml(options.returnSection)}" data-return-key="${escapeHtml(options.returnKey)}"`
+    : '';
 
   return `
-    <button class="meeting-card meeting-card--selectable js-open-meeting" type="button" data-meeting-id="${meeting.id}">
+    <button class="meeting-card meeting-card--selectable js-open-meeting" type="button" data-meeting-id="${meeting.id}"${returnAttributes}>
       <div class="meeting-card-header">
         <div>
           <p class="meeting-meta">${formatDate(meeting.date)} · ${getMeetingDurationLabel(meeting)}</p>
@@ -1251,7 +1421,7 @@ function renderMeetingDetailViewer(meeting) {
   const attendeeNames = getMeetingDisplayParticipants(meeting);
   const customer = getMeetingDisplayCustomer(meeting);
   const partner = getMeetingDisplayPartner(meeting);
-  const openActions = sampleData.actions.filter((action) => action.sourceMeetingId === meeting.id && action.status !== 'Completed' && action.status !== 'Cancelled').length;
+  const openActions = getMeetingOpenActionCount(meeting);
   const durationLabel = (typeof meeting.duration === 'string' && meeting.duration.trim())
     ? meeting.duration
     : (typeof meeting.durationMinutes === 'number' && meeting.durationMinutes > 0 ? `${meeting.durationMinutes} minutes` : 'Not captured yet');
@@ -1479,21 +1649,83 @@ function populateViewerContent(meeting) {
 }
 
 function renderCustomers() {
-  const list = sampleData.customers.map((customer) => {
-    const meetingCount = customer.meetings.length;
-    const partner = getPartnerById(customer.partnerId);
+  const customerGroups = getCustomersFromMeetings();
+
+  if (state.selectedCustomerKey) {
+    const selectedCustomer = getCustomerGroupByKey(state.selectedCustomerKey);
+    if (!selectedCustomer) {
+      state.selectedCustomerKey = null;
+      return renderCustomers();
+    }
+
+    const partnersLabel = selectedCustomer.relatedNames.length ? selectedCustomer.relatedNames.join(', ') : 'No partners captured';
+    const latestMeetingDate = selectedCustomer.latestMeetingDate ? formatDate(selectedCustomer.latestMeetingDate) : 'Date not available';
+    const historyList = selectedCustomer.meetings.length
+      ? selectedCustomer.meetings.map((meeting) => renderMeetingListItem(meeting, {
+        returnSection: 'customers',
+        returnKey: selectedCustomer.key
+      })).join('')
+      : '<div class="empty-state">No meetings available for this customer yet.</div>';
 
     return `
-      <article class="entity-card">
-        <h4>${customer.name}</h4>
-        <p>${customer.country}</p>
-        <div class="entity-meta">
-          <span class="badge">${meetingCount} meetings</span>
-          <span>Partner: ${partner ? partner.name : 'No partner listed'}</span>
+      <section class="panel-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Customer detail</p>
+            <h3>${escapeHtml(selectedCustomer.name)}</h3>
+          </div>
+          <button class="secondary-button js-back-to-customers" type="button">← Return to customers</button>
         </div>
-      </article>
+        <div class="viewer-meta-grid">
+          <div>
+            <strong>Total meetings</strong>
+            <span>${selectedCustomer.meetings.length}</span>
+          </div>
+          <div>
+            <strong>Latest meeting date</strong>
+            <span>${latestMeetingDate}</span>
+          </div>
+          <div>
+            <strong>Partners involved</strong>
+            <span>${escapeHtml(partnersLabel)}</span>
+          </div>
+          <div>
+            <strong>Open actions</strong>
+            <span>${selectedCustomer.openActions}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel-card">
+        <div class="section-heading">
+          <h3>Meeting History</h3>
+        </div>
+        <div class="meeting-list">${historyList}</div>
+      </section>
     `;
-  }).join('');
+  }
+
+  const list = customerGroups.length
+    ? customerGroups.map((customer) => {
+      const meetingCount = customer.meetings.length;
+      const partnersLabel = customer.relatedNames.length ? customer.relatedNames.join(', ') : 'No partners captured';
+      const latestMeetingDate = customer.latestMeetingDate ? formatDate(customer.latestMeetingDate) : 'Date not available';
+
+      return `
+        <button class="entity-card meeting-card--selectable js-open-customer-detail" type="button" data-customer-key="${escapeHtml(customer.key)}">
+          <h4>${escapeHtml(customer.name)}</h4>
+          <p>Latest meeting: ${escapeHtml(latestMeetingDate)}</p>
+          <div class="entity-meta">
+            <span class="badge">${meetingCount} meetings</span>
+            <span>Partners: ${escapeHtml(partnersLabel)}</span>
+          </div>
+          <div class="entity-meta">
+            <span>Open actions: ${customer.openActions}</span>
+          </div>
+        </button>
+      `;
+    }).join('')
+    : '<div class="empty-state">No customer names were found in the available meetings.</div>';
 
   return `
     <section class="panel-card">
@@ -1506,18 +1738,82 @@ function renderCustomers() {
 }
 
 function renderPartners() {
-  const list = sampleData.partners.map((partner) => {
+  const partnerGroups = getPartnersFromMeetings();
+
+  if (state.selectedPartnerKey) {
+    const selectedPartner = getPartnerGroupByKey(state.selectedPartnerKey);
+    if (!selectedPartner) {
+      state.selectedPartnerKey = null;
+      return renderPartners();
+    }
+
+    const customersLabel = selectedPartner.relatedNames.length ? selectedPartner.relatedNames.join(', ') : 'No customers captured';
+    const latestMeetingDate = selectedPartner.latestMeetingDate ? formatDate(selectedPartner.latestMeetingDate) : 'Date not available';
+    const historyList = selectedPartner.meetings.length
+      ? selectedPartner.meetings.map((meeting) => renderMeetingListItem(meeting, {
+        returnSection: 'partners',
+        returnKey: selectedPartner.key
+      })).join('')
+      : '<div class="empty-state">No meetings available for this partner yet.</div>';
+
     return `
-      <article class="entity-card">
-        <h4>${partner.name}</h4>
-        <p>${partner.country}</p>
-        <div class="entity-meta">
-          <span class="badge">${partner.meetings.length} meetings</span>
-          <span>Customers: ${partner.associatedCustomers.join(', ')}</span>
+      <section class="panel-card">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Partner detail</p>
+            <h3>${escapeHtml(selectedPartner.name)}</h3>
+          </div>
+          <button class="secondary-button js-back-to-partners" type="button">← Return to partners</button>
         </div>
-      </article>
+        <div class="viewer-meta-grid">
+          <div>
+            <strong>Total meetings</strong>
+            <span>${selectedPartner.meetings.length}</span>
+          </div>
+          <div>
+            <strong>Latest meeting date</strong>
+            <span>${latestMeetingDate}</span>
+          </div>
+          <div>
+            <strong>Associated customers</strong>
+            <span>${escapeHtml(customersLabel)}</span>
+          </div>
+          <div>
+            <strong>Open actions</strong>
+            <span>${selectedPartner.openActions}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel-card">
+        <div class="section-heading">
+          <h3>Meeting History</h3>
+        </div>
+        <div class="meeting-list">${historyList}</div>
+      </section>
     `;
-  }).join('');
+  }
+
+  const list = partnerGroups.length
+    ? partnerGroups.map((partner) => {
+      const latestMeetingDate = partner.latestMeetingDate ? formatDate(partner.latestMeetingDate) : 'Date not available';
+      const customersLabel = partner.relatedNames.length ? partner.relatedNames.join(', ') : 'No customers captured';
+
+      return `
+        <button class="entity-card meeting-card--selectable js-open-partner-detail" type="button" data-partner-key="${escapeHtml(partner.key)}">
+          <h4>${escapeHtml(partner.name)}</h4>
+          <p>Latest meeting: ${escapeHtml(latestMeetingDate)}</p>
+          <div class="entity-meta">
+            <span class="badge">${partner.meetings.length} meetings</span>
+            <span>Customers: ${escapeHtml(customersLabel)}</span>
+          </div>
+          <div class="entity-meta">
+            <span>Open actions: ${partner.openActions}</span>
+          </div>
+        </button>
+      `;
+    }).join('')
+    : '<div class="empty-state">No partner names were found in the available meetings.</div>';
 
   return `
     <section class="panel-card">
@@ -1931,8 +2227,36 @@ function handleSaveMeeting() {
 }
 
 function attachInteractions() {
+  document.querySelectorAll('.js-open-customer-detail').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.activeSection = 'customers';
+      state.selectedCustomerKey = button.dataset.customerKey || null;
+      state.selectedPartnerKey = null;
+      state.selectedMeetingId = null;
+      state.meetingReturnContext = null;
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-open-partner-detail').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.activeSection = 'partners';
+      state.selectedPartnerKey = button.dataset.partnerKey || null;
+      state.selectedCustomerKey = null;
+      state.selectedMeetingId = null;
+      state.meetingReturnContext = null;
+      renderViews();
+    });
+  });
+
   document.querySelectorAll('.js-open-meeting').forEach((button) => {
     button.addEventListener('click', () => {
+      const returnSection = button.dataset.returnSection;
+      const returnKey = button.dataset.returnKey;
+
+      state.meetingReturnContext = (returnSection && returnKey)
+        ? { section: returnSection, key: returnKey }
+        : null;
       state.activeSection = 'meetings';
       state.selectedMeetingId = button.dataset.meetingId;
       state.activeViewerTab = 'overview';
@@ -1942,7 +2266,32 @@ function attachInteractions() {
 
   document.querySelectorAll('.js-back-to-meetings').forEach((button) => {
     button.addEventListener('click', () => {
+      if (state.meetingReturnContext && state.meetingReturnContext.section === 'customers') {
+        state.activeSection = 'customers';
+        state.selectedCustomerKey = state.meetingReturnContext.key;
+        state.selectedPartnerKey = null;
+      } else if (state.meetingReturnContext && state.meetingReturnContext.section === 'partners') {
+        state.activeSection = 'partners';
+        state.selectedPartnerKey = state.meetingReturnContext.key;
+        state.selectedCustomerKey = null;
+      }
+
       state.selectedMeetingId = null;
+      state.meetingReturnContext = null;
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-back-to-customers').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.selectedCustomerKey = null;
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-back-to-partners').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.selectedPartnerKey = null;
       renderViews();
     });
   });
@@ -2027,6 +2376,9 @@ function attachInteractions() {
     topImportButton.addEventListener('click', () => {
       state.activeSection = 'import';
       state.selectedMeetingId = null;
+      state.selectedCustomerKey = null;
+      state.selectedPartnerKey = null;
+      state.meetingReturnContext = null;
       state.activeViewerTab = 'overview';
       renderViews();
     });
@@ -2052,6 +2404,14 @@ function getParticipantById(participantId) {
 function getPageTitle() {
   if (state.activeSection === 'meetings' && state.selectedMeetingId) {
     return 'Meeting Details';
+  }
+
+  if (state.activeSection === 'customers' && state.selectedCustomerKey) {
+    return 'Customer Details';
+  }
+
+  if (state.activeSection === 'partners' && state.selectedPartnerKey) {
+    return 'Partner Details';
   }
 
   return sectionTitles[state.activeSection] || 'Dashboard';
