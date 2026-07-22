@@ -342,6 +342,32 @@ summary:focus-visible {
   word-break: break-word;
 }
 
+.auth-user-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.auth-role-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(143, 227, 179, 0.38);
+  background: rgba(143, 227, 179, 0.16);
+  color: #effaf3;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.auth-user-warning {
+  color: #d7e7db;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .main-content {
   width: 100%;
   max-width: none;

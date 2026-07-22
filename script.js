@@ -17,16 +17,48 @@ const ACTION_FILTERS = ['All', 'Open', 'In Progress', 'Waiting for Customer', 'W
 const SEARCH_MIN_CHARS = 2;
 const SEARCH_DEBOUNCE_MS = 180;
 const AUTH_ERROR_MESSAGE = 'Unable to sign in. Check your email and password and try again.';
+const SUPPORTED_PROFILE_ROLES = ['admin', 'user'];
+const MEETING_ROW_COLUMNS = [
+  'id',
+  'user_id',
+  'title',
+  'meeting_date',
+  'start_time',
+  'duration',
+  'customer',
+  'partner',
+  'participants',
+  'subject',
+  'summary',
+  'decisions',
+  'actions',
+  'open_questions',
+  'commercial_notes',
+  'cleaned_transcript',
+  'extracted_text',
+  'extracted_html',
+  'extra_sections',
+  'original_file_name',
+  'created_at',
+  'updated_at'
+].join(', ');
 
 let supabaseClient = null;
 let authSubscription = null;
 let appInitialized = false;
 let authFormBound = false;
+let authProfileLoadToken = 0;
+let cloudMeetingsLoadToken = 0;
 
 const authState = {
   checking: true,
   signingIn: false,
   user: null,
+  profile: null,
+  profileWarning: '',
+  meetingsLoading: false,
+  meetingsLoadError: '',
+  meetingsLoaded: false,
   error: '',
   status: 'Checking session...'
 };
@@ -40,7 +72,9 @@ function getAuthElements() {
     form: document.getElementById('login-form'),
     email: document.getElementById('login-email'),
     password: document.getElementById('login-password'),
-    submit: document.getElementById('sign-in-button')
+    submit: document.getElementById('sign-in-button'),
+    roleBadge: document.querySelector('.js-auth-role-badge'),
+    userWarning: document.querySelector('.js-auth-user-warning')
   };
 }
 
@@ -92,6 +126,80 @@ function setupLogoFallbacks() {
   });
 }
 
+function clearAuthenticatedProfileState() {
+  authState.profile = null;
+  authState.profileWarning = '';
+}
+
+function createDefaultProfileFromUser(user) {
+  if (!user) {
+    return null;
+  }
+
+  return {
+    id: user.id || '',
+    email: user.email || '',
+    role: 'user'
+  };
+}
+
+function normalizeProfileRole(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return SUPPORTED_PROFILE_ROLES.includes(normalized) ? normalized : 'user';
+}
+
+function getRoleLabel(role) {
+  return role === 'admin' ? 'Administrator' : 'User';
+}
+
+function isCurrentUserAdmin() {
+  return Boolean(authState.profile && authState.profile.role === 'admin');
+}
+
+async function loadAuthenticatedProfile(user) {
+  const fallbackProfile = createDefaultProfileFromUser(user);
+  if (!supabaseClient || !user || !user.id) {
+    return {
+      profile: fallbackProfile,
+      warning: 'Your profile could not be verified. Administrator access is unavailable.'
+    };
+  }
+
+  const { data, error } = await supabaseClient
+    .from('profiles')
+    .select('id, email, role')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  if (error) {
+    return {
+      profile: fallbackProfile,
+      warning: 'Your profile could not be loaded. Administrator access is unavailable.'
+    };
+  }
+
+  if (!data || !data.id) {
+    return {
+      profile: fallbackProfile,
+      warning: 'No profile record was found. Administrator access is unavailable.'
+    };
+  }
+
+  const normalizedRole = normalizeProfileRole(data.role);
+  const warning = SUPPORTED_PROFILE_ROLES.includes(String(data.role || '').trim().toLowerCase())
+    ? ''
+    : 'Your profile role was invalid and was treated as User.';
+
+  return {
+    profile: {
+      id: String(data.id || user.id),
+      email: String(data.email || user.email || ''),
+      role: normalizedRole
+    },
+    warning
+  };
+}
+
 function setAuthFormDisabled(disabled) {
   const { form, email, password, submit } = getAuthElements();
   if (form) {
@@ -115,7 +223,7 @@ function updateAuthView() {
   const { authView, status, error } = getAuthElements();
 
   if (authView) {
-    authView.hidden = Boolean(authState.user);
+    authView.hidden = Boolean(authState.user) && !authState.meetingsLoading;
   }
 
   if (status) {
@@ -134,6 +242,68 @@ function updateAuthView() {
   setAuthFormDisabled(shouldDisable);
 }
 
+function clearCloudMeetingState() {
+  state.savedMeetings = [];
+  state.cloudMeetingsError = '';
+  state.cloudMeetingsLoaded = false;
+  authState.meetingsLoading = false;
+  authState.meetingsLoadError = '';
+  state.migrationInProgress = false;
+  state.migrationArchiveAvailable = false;
+}
+
+async function loadAuthenticatedMeetings() {
+  const loadToken = ++cloudMeetingsLoadToken;
+
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    clearCloudMeetingState();
+    return { success: false, error: 'No authenticated user is available for meeting loading.' };
+  }
+
+  authState.meetingsLoading = true;
+  authState.meetingsLoadError = '';
+  state.cloudMeetingsError = '';
+  state.cloudMeetingsLoaded = false;
+
+  const { data, error } = await supabaseClient
+    .from('meetings')
+    .select(MEETING_ROW_COLUMNS)
+    .eq('user_id', authState.user.id)
+    .order('meeting_date', { ascending: false })
+    .order('updated_at', { ascending: false });
+
+  if (loadToken !== cloudMeetingsLoadToken) {
+    return { success: false, error: 'Meeting loading was superseded by a newer session state.' };
+  }
+
+  authState.meetingsLoading = false;
+
+  if (error) {
+    state.savedMeetings = [];
+    state.cloudMeetingsLoaded = false;
+    authState.meetingsLoadError = 'Unable to load cloud meetings. Please try again.';
+    state.cloudMeetingsError = authState.meetingsLoadError;
+    return { success: false, error: authState.meetingsLoadError };
+  }
+
+  state.savedMeetings = Array.isArray(data)
+    ? data.map((row) => mapDatabaseRowToMeeting(row)).sort(compareMeetingsNewestFirst)
+    : [];
+  state.cloudMeetingsLoaded = true;
+  authState.meetingsLoadError = '';
+  state.cloudMeetingsError = '';
+  return { success: true };
+}
+
+async function handleRetryCloudMeetings() {
+  if (!authState.user) {
+    return;
+  }
+
+  await loadAuthenticatedMeetings();
+  renderViews();
+}
+
 function clearAppViewPanels() {
   mainPanelIds.forEach((panelId) => {
     const panel = document.getElementById(panelId);
@@ -146,32 +316,63 @@ function clearAppViewPanels() {
 function updateSignedInUserPanel() {
   const userPanel = document.querySelector('.js-auth-user-panel');
   const userEmail = document.querySelector('.js-auth-user-email');
+  const roleBadge = document.querySelector('.js-auth-role-badge');
+  const userWarning = document.querySelector('.js-auth-user-warning');
 
-  if (!userPanel || !userEmail) {
+  if (!userPanel || !userEmail || !roleBadge || !userWarning) {
     return;
   }
 
-  if (!authState.user || !authState.user.email) {
+  if (!authState.user || !authState.profile || !authState.profile.email) {
     userPanel.hidden = true;
     userEmail.textContent = '';
+    roleBadge.textContent = 'User';
+    userWarning.textContent = '';
+    userWarning.hidden = true;
     return;
   }
 
-  userEmail.textContent = authState.user.email;
+  userEmail.textContent = authState.profile.email;
+  roleBadge.textContent = getRoleLabel(authState.profile.role);
+  userWarning.textContent = authState.profileWarning;
+  userWarning.hidden = !authState.profileWarning;
   userPanel.hidden = false;
 }
 
-function setAppAuthenticated(user) {
+async function setAppAuthenticated(user) {
   const { appShell } = getAuthElements();
+  const profileLoadToken = ++authProfileLoadToken;
+  ++cloudMeetingsLoadToken;
+
+  if (appShell) {
+    appShell.hidden = true;
+  }
 
   authState.user = user || null;
   authState.checking = false;
   authState.signingIn = false;
+  clearCloudMeetingState();
+
+  if (!authState.user) {
+    clearAuthenticatedProfileState();
+  } else {
+    const profileResult = await loadAuthenticatedProfile(authState.user);
+    if (profileLoadToken !== authProfileLoadToken) {
+      return;
+    }
+
+    authState.profile = profileResult.profile;
+    authState.profileWarning = profileResult.warning;
+    authState.status = 'Loading meetings...';
+    updateAuthView();
+    await loadAuthenticatedMeetings();
+  }
 
   if (appShell) {
     appShell.hidden = !authState.user;
   }
 
+  authState.status = '';
   updateSignedInUserPanel();
   updateAuthView();
 
@@ -297,7 +498,7 @@ async function bootstrapAuthentication() {
   }
 
   const existingUser = data && data.user ? data.user : null;
-  setAppAuthenticated(existingUser);
+  await setAppAuthenticated(existingUser);
   subscribeToAuthChanges();
 }
 
@@ -1073,6 +1274,113 @@ function normalizeMeetingRecord(meeting) {
   return normalizedMeeting;
 }
 
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((entry) => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function normalizeMeetingParticipants(value) {
+  if (Array.isArray(value)) {
+    return value
+      .filter((entry) => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+  }
+
+  if (typeof value === 'string') {
+    return parseParticipantsForMeeting(value);
+  }
+
+  return [];
+}
+
+function mapMeetingToDatabaseRow(meeting, authenticatedUserId) {
+  const normalizedMeeting = normalizeMeetingRecord(meeting || {});
+  const now = new Date().toISOString();
+
+  return {
+    id: String(normalizedMeeting.id || createMeetingId()),
+    user_id: String(authenticatedUserId || ''),
+    title: String(normalizedMeeting.title || '').trim(),
+    meeting_date: normalizeExtractedDate(normalizedMeeting.date || ''),
+    start_time: String(normalizedMeeting.startTime || '').trim(),
+    duration: String(normalizedMeeting.duration || '').trim(),
+    customer: String(normalizedMeeting.customer || '').trim(),
+    partner: String(normalizedMeeting.partner || '').trim(),
+    participants: normalizeMeetingParticipants(normalizedMeeting.participants),
+    subject: String(normalizedMeeting.subject || '').trim(),
+    summary: normalizeStringArray(normalizedMeeting.summary),
+    decisions: normalizeStringArray(normalizedMeeting.decisions),
+    actions: normalizeStringArray(normalizedMeeting.actions),
+    open_questions: normalizeStringArray(normalizedMeeting.openQuestions),
+    commercial_notes: normalizeStringArray(normalizedMeeting.commercialNotes),
+    cleaned_transcript: String(normalizedMeeting.cleanedTranscript || '').trim(),
+    extracted_text: String(normalizedMeeting.extractedText || normalizedMeeting.transcript || '').trim(),
+    extracted_html: String(normalizedMeeting.extractedHtml || '').trim(),
+    extra_sections: Array.isArray(normalizedMeeting.extraSections)
+      ? normalizedMeeting.extraSections.map((section) => ({
+        heading: String(section.heading || '').trim(),
+        lines: normalizeStringArray(section.lines)
+      }))
+      : [],
+    original_file_name: String(normalizedMeeting.originalFileName || '').trim(),
+    created_at: normalizedMeeting.createdAt || now,
+    updated_at: normalizedMeeting.updatedAt || now
+  };
+}
+
+function mapDatabaseRowToMeeting(row) {
+  if (!row || typeof row !== 'object') {
+    return normalizeMeetingRecord({});
+  }
+
+  return normalizeMeetingRecord({
+    id: String(row.id || ''),
+    userId: String(row.user_id || ''),
+    title: String(row.title || '').trim(),
+    date: normalizeExtractedDate(row.meeting_date || ''),
+    dateText: normalizeExtractedDate(row.meeting_date || '') || '',
+    startTime: String(row.start_time || '').trim(),
+    duration: String(row.duration || '').trim(),
+    durationMinutes: 0,
+    meetingType: 'Imported',
+    customerId: null,
+    partnerId: null,
+    participantIds: [],
+    subject: String(row.subject || '').trim(),
+    tags: [],
+    summary: normalizeStringArray(row.summary),
+    decisions: normalizeStringArray(row.decisions),
+    actions: normalizeStringArray(row.actions),
+    actionItemIds: [],
+    openQuestions: normalizeStringArray(row.open_questions),
+    commercialNotes: normalizeStringArray(row.commercial_notes),
+    cleanedTranscript: String(row.cleaned_transcript || '').trim(),
+    extractedText: String(row.extracted_text || '').trim(),
+    extractedHtml: String(row.extracted_html || '').trim(),
+    transcript: String(row.extracted_text || row.cleaned_transcript || '').trim(),
+    extraSections: Array.isArray(row.extra_sections)
+      ? row.extra_sections.map(normalizeExtraSection).filter(Boolean)
+      : [],
+    originalFileName: String(row.original_file_name || '').trim(),
+    customer: String(row.customer || '').trim(),
+    partner: String(row.partner || '').trim(),
+    participants: normalizeMeetingParticipants(row.participants),
+    createdAt: String(row.created_at || ''),
+    updatedAt: String(row.updated_at || row.created_at || '')
+  });
+}
+
+function getLocalStagedMeetings() {
+  return readStoredMeetings();
+}
+
 function writeStoredMeetings(meetings) {
   if (typeof window === 'undefined' || !window.localStorage) {
     return false;
@@ -1176,7 +1484,7 @@ function buildBackupPayload() {
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
     data: {
-      meetings: readStoredMeetings(),
+      meetings: [...state.savedMeetings].map(normalizeMeetingRecord),
       actionOverrides: getNormalizedActionOverridesArray(readStoredActionOverrides()),
       settings: readStoredSettings()
     }
@@ -1332,8 +1640,12 @@ const state = {
   searchResultsOpen: false,
   searchActiveIndex: -1,
   searchHighlightedActionId: '',
-  savedMeetings: readStoredMeetings(),
+  savedMeetings: [],
   savedSettings: readStoredSettings(),
+  cloudMeetingsError: '',
+  cloudMeetingsLoaded: false,
+  migrationInProgress: false,
+  migrationArchiveAvailable: false,
   importSelectedFile: null,
   importError: '',
   importSuccessMessage: '',
@@ -1468,7 +1780,13 @@ function saveMeetingEdits() {
   const meetingId = state.selectedMeetingId;
   const meetingIndex = getSavedMeetingIndex(meetingId);
   if (meetingIndex < 0) {
-    state.meetingEditError = 'Only meetings saved in this browser can be edited.';
+    state.meetingEditError = 'Only meetings loaded for this account can be edited.';
+    renderViews();
+    return;
+  }
+
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.meetingEditError = 'You must be signed in to save meeting changes.';
     renderViews();
     return;
   }
@@ -1510,31 +1828,48 @@ function saveMeetingEdits() {
   };
 
   const updatedMeetings = [...state.savedMeetings];
-  updatedMeetings[meetingIndex] = updatedMeeting;
+  const meetingRow = mapMeetingToDatabaseRow(updatedMeeting, authState.user.id);
 
-  const stored = writeStoredMeetings(updatedMeetings);
-  if (!stored) {
-    state.meetingEditError = 'Unable to save changes in this browser.';
-    renderViews();
-    return;
-  }
+  supabaseClient
+    .from('meetings')
+    .update(meetingRow)
+    .eq('id', meetingId)
+    .eq('user_id', authState.user.id)
+    .select(MEETING_ROW_COLUMNS)
+    .single()
+    .then(({ data, error }) => {
+      if (error || !data) {
+        state.meetingEditError = 'Unable to save changes to Supabase right now.';
+        renderViews();
+        return;
+      }
 
-  state.savedMeetings = updatedMeetings;
-  state.meetingEditMode = false;
-  state.meetingEditDraft = null;
-  state.meetingEditError = '';
-  renderViews();
+      updatedMeetings[meetingIndex] = mapDatabaseRowToMeeting(data);
+      state.savedMeetings = updatedMeetings.sort(compareMeetingsNewestFirst);
+      state.meetingEditMode = false;
+      state.meetingEditDraft = null;
+      state.meetingEditError = '';
+      renderViews();
+    });
+
+  return;
 }
 
-function deleteSavedMeeting() {
+async function deleteSavedMeeting() {
   const meetingId = state.selectedMeetingId;
   const meetingIndex = getSavedMeetingIndex(meetingId);
   if (meetingIndex < 0) {
     return;
   }
 
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.meetingEditError = 'You must be signed in to delete meetings.';
+    renderViews();
+    return;
+  }
+
   const meeting = state.savedMeetings[meetingIndex];
-  const confirmed = window.confirm(`Delete "${meeting.title}"?\n\nThis removes the saved meeting from this browser.`);
+  const confirmed = window.confirm(`Delete "${meeting.title}"?\n\nThis removes the meeting from your Supabase account.`);
   if (!confirmed) {
     return;
   }
@@ -1547,6 +1882,7 @@ function deleteSavedMeeting() {
     return accumulator;
   }, {});
 
+  const previousOverrides = { ...state.actionOverrides };
   const overridesStored = writeStoredActionOverrides(nextOverrides);
   if (!overridesStored) {
     state.meetingEditError = 'Unable to remove related action overrides.';
@@ -1554,13 +1890,22 @@ function deleteSavedMeeting() {
     return;
   }
 
-  const updatedMeetings = state.savedMeetings.filter((meetingItem) => meetingItem.id !== meetingId);
-  const meetingsStored = writeStoredMeetings(updatedMeetings);
-  if (!meetingsStored) {
-    state.meetingEditError = 'Unable to delete this meeting in this browser.';
+  const { data, error } = await supabaseClient
+    .from('meetings')
+    .delete()
+    .eq('id', meetingId)
+    .eq('user_id', authState.user.id)
+    .select('id')
+    .maybeSingle();
+
+  if (error || !data) {
+    writeStoredActionOverrides(previousOverrides);
+    state.meetingEditError = 'Unable to delete this meeting from Supabase right now.';
     renderViews();
     return;
   }
+
+  const updatedMeetings = state.savedMeetings.filter((meetingItem) => meetingItem.id !== meetingId);
 
   state.actionOverrides = nextOverrides;
   state.savedMeetings = updatedMeetings;
@@ -1804,10 +2149,36 @@ function updateNavigation(buttons) {
   });
 }
 
+function renderCloudMeetingsState() {
+  if (authState.meetingsLoading) {
+    return `
+      <section class="panel-card">
+        ${renderEmptyState('Loading cloud meetings', 'Your meetings are being loaded from Supabase.')}
+      </section>
+    `;
+  }
+
+  if (state.cloudMeetingsError) {
+    return `
+      <section class="panel-card">
+        <div class="empty-state">
+          <h4>Unable to load cloud meetings</h4>
+          <p>${escapeHtml(state.cloudMeetingsError)}</p>
+          <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading meetings</button>
+        </div>
+      </section>
+    `;
+  }
+
+  return '';
+}
+
 function renderViews() {
   if (!authState.user) {
     return;
   }
+
+  const cloudMeetingsState = renderCloudMeetingsState();
 
   const viewSections = {
     dashboard: document.getElementById('dashboard-view'),
@@ -1819,6 +2190,28 @@ function renderViews() {
     dataManagement: document.getElementById('dataManagement-view'),
     import: document.getElementById('import-view')
   };
+
+  if (cloudMeetingsState) {
+    viewSections.dashboard.innerHTML = cloudMeetingsState;
+    viewSections.meetings.innerHTML = cloudMeetingsState;
+    viewSections.customers.innerHTML = cloudMeetingsState;
+    viewSections.partners.innerHTML = cloudMeetingsState;
+    viewSections.participants.innerHTML = cloudMeetingsState;
+    viewSections.actions.innerHTML = cloudMeetingsState;
+    viewSections.dataManagement.innerHTML = renderDataManagement();
+    viewSections.import.innerHTML = renderImport();
+
+    updateNavigation(Array.from(document.querySelectorAll('.nav-button')).map((button) => ({
+      button,
+      section: button.dataset.section
+    })));
+
+    renderGlobalSearchPanel();
+    document.getElementById('page-title').textContent = getPageTitle();
+    attachInteractions();
+    updateImportSaveButtonState();
+    return;
+  }
 
   viewSections.dashboard.innerHTML = renderDashboard(getVisibleMeetings());
 
@@ -3754,7 +4147,6 @@ function handleExportBackup() {
 }
 
 function resetStateAfterDataReplacement() {
-  state.savedMeetings = readStoredMeetings();
   state.actionOverrides = readStoredActionOverrides();
   state.savedSettings = readStoredSettings();
   state.selectedMeetingId = null;
@@ -3800,7 +4192,7 @@ async function handleRestoreBackup() {
 
   const confirmed = window.confirm(
     'Restore this backup?\\n\\n'
-      + 'This will replace current browser data (meetings, action overrides, and settings).\\n'
+      + 'This will replace local migration staging data in this browser (meetings, action overrides, and settings).\\n'
       + 'Export a backup first if you need to keep the current state.'
   );
 
@@ -3820,12 +4212,18 @@ async function handleRestoreBackup() {
   resetStateAfterDataReplacement();
   state.dataManagementSelectedBackupFile = null;
   state.dataManagementSelectedBackupName = '';
-  state.dataManagementSuccess = 'Backup restored successfully. Local browser data was replaced.';
+  state.dataManagementSuccess = 'Backup restored to local migration staging.';
   renderViews();
 }
 
 function handleClearAllLocalData() {
   clearDataManagementMessages();
+
+  if (!isCurrentUserAdmin()) {
+    state.dataManagementError = 'Only administrators can clear all local data.';
+    renderViews();
+    return;
+  }
 
   const warningConfirmed = window.confirm(
     'Clear all local data?\\n\\n'
@@ -3869,6 +4267,9 @@ function renderDataManagement() {
   const actionOverrideCount = Object.keys(state.actionOverrides || {}).length;
   const backupSizeLabel = getBackupSizeLabel();
   const latestExportLabel = formatDateTime(state.dataManagementLastExportAt);
+  const isAdmin = isCurrentUserAdmin();
+  const localStagedMeetings = getLocalStagedMeetings();
+  const localStagedCount = localStagedMeetings.length;
   const errorMessage = state.dataManagementError
     ? `<p class="import-error" role="alert">${escapeHtml(state.dataManagementError)}</p>`
     : '';
@@ -3878,6 +4279,46 @@ function renderDataManagement() {
   const selectedBackup = state.dataManagementSelectedBackupName
     ? `<p class="entity-meta">Selected file: ${escapeHtml(state.dataManagementSelectedBackupName)}</p>`
     : '<p class="entity-meta">No backup file selected.</p>';
+  const roleMessage = isAdmin
+    ? 'Administrators can export, restore, and clear local application data.'
+    : 'You can export and restore your local application data. Clearing all data is restricted to administrators.';
+  const cloudMessage = state.cloudMeetingsError
+    ? `
+      <div class="import-preview-panel">
+        <div class="section-heading">
+          <h4>Cloud meetings unavailable</h4>
+        </div>
+        <p class="entity-meta">${escapeHtml(state.cloudMeetingsError)}</p>
+        <button class="secondary-button js-retry-cloud-meetings" type="button">Retry loading meetings</button>
+      </div>
+    `
+    : '';
+  const migrationNotice = state.cloudMeetingsLoaded && localStagedCount
+    ? `
+      <div class="import-preview-panel">
+        <div class="section-heading">
+          <h4>Local migration staging</h4>
+        </div>
+        <p class="entity-meta">Local meetings were found in this browser.</p>
+        <p class="entity-meta">${localStagedCount} local meetings are available for migration. Existing cloud meetings will be preserved and duplicates will be skipped by meeting id.</p>
+        <div class="data-management-actions">
+          <button class="primary-button js-import-local-meetings" type="button" ${state.migrationInProgress ? 'disabled' : ''}>${state.migrationInProgress ? 'Importing...' : 'Import Local Meetings to Supabase'}</button>
+          ${state.migrationArchiveAvailable ? '<button class="secondary-button js-archive-local-meetings" type="button">Archive Local Meeting Copy</button>' : ''}
+        </div>
+      </div>
+    `
+    : '';
+  const clearAllPanel = isAdmin
+    ? `
+      <div class="import-preview-panel data-management-danger-zone">
+        <div class="section-heading">
+          <h4>Clear local data</h4>
+        </div>
+        <p class="entity-meta">This removes all saved meetings and action overrides from this browser. Export a backup first if needed.</p>
+        <button class="secondary-button data-management-danger-button js-clear-all-local-data" type="button">Clear All Local Data</button>
+      </div>
+    `
+    : '';
 
   return `
     <section class="import-card">
@@ -3887,10 +4328,13 @@ function renderDataManagement() {
           <h3>Backup and restore local browser data</h3>
         </div>
       </div>
-      <p class="import-description">Use backup export before making large changes. Restore replaces your current browser data.</p>
+      <p class="import-description">Use backup export before making large changes. Restore writes only to local migration staging in this browser.</p>
+      <p class="entity-meta">${escapeHtml(roleMessage)}</p>
+      ${cloudMessage}
+      ${migrationNotice}
 
       <div class="panel-card data-management-stats">
-        <p><strong>Saved meetings:</strong> ${meetingCount}</p>
+        <p><strong>Cloud meetings loaded:</strong> ${meetingCount}</p>
         <p><strong>Action overrides:</strong> ${actionOverrideCount}</p>
         <p><strong>Approximate backup size:</strong> ${escapeHtml(backupSizeLabel)}</p>
         <p><strong>Latest export this session:</strong> ${escapeHtml(latestExportLabel)}</p>
@@ -3903,30 +4347,24 @@ function renderDataManagement() {
         <div class="section-heading">
           <h4>Export backup</h4>
         </div>
-        <p class="entity-meta">Downloads meetings, action overrides, and settings as a JSON backup file.</p>
+        <p class="entity-meta">Downloads currently loaded cloud meetings, local action overrides, and settings as a JSON backup file.</p>
         <button class="primary-button js-export-backup" type="button">Export Backup</button>
       </div>
 
       <div class="import-preview-panel">
         <div class="section-heading">
-          <h4>Restore backup</h4>
+          <h4>Restore to Local Migration Staging</h4>
         </div>
-        <p class="entity-meta">Validate and restore a backup JSON file. Unknown fields are ignored safely.</p>
+        <p class="entity-meta">Validate and restore a backup JSON file into browser-local staging. Restored meetings do not overwrite Supabase automatically.</p>
         <div class="data-management-actions">
           <input id="restore-backup-input" class="sr-only" type="file" accept=".json,application/json">
           <button class="secondary-button js-select-restore-file" type="button">Choose Backup File</button>
-          <button class="primary-button js-restore-backup" type="button">Restore Backup</button>
+          <button class="primary-button js-restore-backup" type="button">Restore to Local Migration Staging</button>
         </div>
         ${selectedBackup}
       </div>
 
-      <div class="import-preview-panel data-management-danger-zone">
-        <div class="section-heading">
-          <h4>Clear local data</h4>
-        </div>
-        <p class="entity-meta">This removes all saved meetings and action overrides from this browser. Export a backup first if needed.</p>
-        <button class="secondary-button data-management-danger-button js-clear-all-local-data" type="button">Clear All Local Data</button>
-      </div>
+      ${clearAllPanel}
     </section>
   `;
 }
@@ -4242,6 +4680,14 @@ function handleSaveMeeting() {
     return;
   }
 
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.importError = 'You must be signed in to save meetings.';
+    state.importSuccessMessage = '';
+    renderViews();
+    updateImportSaveButtonState();
+    return;
+  }
+
   state.importError = '';
   state.importSuccessMessage = '';
   state.importSaveInProgress = true;
@@ -4296,28 +4742,157 @@ function handleSaveMeeting() {
     updatedAt: new Date().toISOString()
   };
 
-  const updatedMeetings = [meeting, ...state.savedMeetings];
-  const storedSuccessfully = writeStoredMeetings(updatedMeetings);
+  const meetingRow = mapMeetingToDatabaseRow(meeting, authState.user.id);
 
-  if (!storedSuccessfully) {
-    state.importError = 'Unable to save the meeting. Please try again.';
-    state.importSaveInProgress = false;
+  supabaseClient
+    .from('meetings')
+    .insert(meetingRow)
+    .select(MEETING_ROW_COLUMNS)
+    .single()
+    .then(({ data, error }) => {
+      if (error || !data) {
+        state.importError = 'Unable to save the meeting to Supabase. Please try again.';
+        state.importSaveInProgress = false;
+        renderViews();
+        updateImportSaveButtonState();
+        return;
+      }
+
+      const savedMeeting = mapDatabaseRowToMeeting(data);
+      state.savedMeetings = [savedMeeting, ...state.savedMeetings].sort(compareMeetingsNewestFirst);
+      state.importSelectedFile = null;
+      state.importReview = createEmptyImportReview();
+      state.importExtracting = false;
+      state.importExtractionError = '';
+      state.importExtractedText = '';
+      state.importExtractedHtml = '';
+      state.importExtractedSections = createEmptyExtractedSections();
+      state.importSuccessMessage = `Meeting saved successfully as ${savedMeeting.title}.`;
+      state.importSaveInProgress = false;
+      renderViews();
+      updateImportSaveButtonState();
+    });
+
+  return;
+}
+
+function getCloudMeetingMigrationReport(result) {
+  return `Inserted ${result.inserted}, skipped ${result.skipped}, failed ${result.failed}.`;
+}
+
+async function handleImportLocalMeetingsToSupabase() {
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.dataManagementError = 'You must be signed in to import local meetings.';
     renderViews();
     return;
   }
 
-  state.savedMeetings = updatedMeetings;
-  state.importSelectedFile = null;
-  state.importReview = createEmptyImportReview();
-  state.importExtracting = false;
-  state.importExtractionError = '';
-  state.importExtractedText = '';
-  state.importExtractedHtml = '';
-  state.importExtractedSections = createEmptyExtractedSections();
-  state.importSuccessMessage = `Meeting saved successfully as ${meeting.title}.`;
-  state.importSaveInProgress = false;
+  const localMeetings = getLocalStagedMeetings();
+  if (!localMeetings.length) {
+    state.dataManagementError = 'No local meetings were found in this browser.';
+    renderViews();
+    return;
+  }
+
+  const confirmationMessage = [
+    `Import ${localMeetings.length} local meetings to Supabase?`,
+    '',
+    'Existing cloud meetings will be preserved.',
+    'Duplicate meeting ids will be skipped.'
+  ].join('\n');
+
+  const confirmed = window.confirm(confirmationMessage);
+  if (!confirmed) {
+    return;
+  }
+
+  clearDataManagementMessages();
+  state.migrationInProgress = true;
   renderViews();
-  updateImportSaveButtonState();
+
+  const knownIds = new Set(state.savedMeetings.map((meeting) => meeting.id));
+  const report = {
+    inserted: 0,
+    skipped: 0,
+    failed: 0
+  };
+  const insertedMeetings = [];
+
+  for (const localMeeting of localMeetings) {
+    const normalizedMeeting = normalizeMeetingRecord(localMeeting);
+    if (!normalizedMeeting || !normalizedMeeting.id) {
+      report.failed += 1;
+      continue;
+    }
+
+    if (knownIds.has(normalizedMeeting.id)) {
+      report.skipped += 1;
+      continue;
+    }
+
+    const meetingRow = mapMeetingToDatabaseRow(normalizedMeeting, authState.user.id);
+    const { data, error } = await supabaseClient
+      .from('meetings')
+      .insert(meetingRow)
+      .select(MEETING_ROW_COLUMNS)
+      .single();
+
+    if (error || !data) {
+      report.failed += 1;
+      continue;
+    }
+
+    knownIds.add(normalizedMeeting.id);
+    report.inserted += 1;
+    insertedMeetings.push(mapDatabaseRowToMeeting(data));
+  }
+
+  if (insertedMeetings.length) {
+    state.savedMeetings = [...insertedMeetings, ...state.savedMeetings].sort(compareMeetingsNewestFirst);
+    state.cloudMeetingsLoaded = true;
+  }
+
+  state.migrationInProgress = false;
+  state.migrationArchiveAvailable = report.failed === 0 && (report.inserted > 0 || report.skipped > 0);
+  state.dataManagementSuccess = `Local migration completed. ${getCloudMeetingMigrationReport(report)}`;
+  state.dataManagementError = report.failed > 0 ? 'Some local meetings could not be imported to Supabase.' : '';
+  renderViews();
+}
+
+function handleArchiveLocalMeetingCopy() {
+  const localMeetings = getLocalStagedMeetings();
+  if (!localMeetings.length) {
+    state.dataManagementError = 'No local meeting copy is available to archive.';
+    renderViews();
+    return;
+  }
+
+  const confirmed = window.confirm(
+    'Archive the local meeting copy?\n\nA backup will be exported first. This removes only local staged meetings from this browser.'
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const payload = buildBackupPayload();
+  const exported = triggerBackupDownload(payload);
+  if (!exported) {
+    state.dataManagementError = 'Unable to export a backup before archiving the local meeting copy.';
+    renderViews();
+    return;
+  }
+
+  if (typeof window === 'undefined' || !window.localStorage) {
+    state.dataManagementError = 'Browser storage is not available for archiving the local meeting copy.';
+    renderViews();
+    return;
+  }
+
+  window.localStorage.removeItem(STORAGE_KEY);
+  state.migrationArchiveAvailable = false;
+  state.dataManagementLastExportAt = payload.exportedAt;
+  state.dataManagementSuccess = 'The local meeting copy was archived after exporting a backup.';
+  renderViews();
 }
 
 function attachInteractions() {
@@ -4617,6 +5192,9 @@ function attachInteractions() {
   const restoreBackupButton = document.querySelector('.js-restore-backup');
   const exportBackupButton = document.querySelector('.js-export-backup');
   const clearAllLocalDataButton = document.querySelector('.js-clear-all-local-data');
+  const retryCloudMeetingsButtons = document.querySelectorAll('.js-retry-cloud-meetings');
+  const importLocalMeetingsButton = document.querySelector('.js-import-local-meetings');
+  const archiveLocalMeetingsButton = document.querySelector('.js-archive-local-meetings');
   const emptyImportButtons = document.querySelectorAll('.js-go-import');
 
   if (selectRestoreFileButton && restoreBackupInput) {
@@ -4651,6 +5229,24 @@ function attachInteractions() {
   if (clearAllLocalDataButton) {
     clearAllLocalDataButton.addEventListener('click', () => {
       handleClearAllLocalData();
+    });
+  }
+
+  retryCloudMeetingsButtons.forEach((button) => {
+    button.addEventListener('click', () => {
+      handleRetryCloudMeetings();
+    });
+  });
+
+  if (importLocalMeetingsButton) {
+    importLocalMeetingsButton.addEventListener('click', () => {
+      handleImportLocalMeetingsToSupabase();
+    });
+  }
+
+  if (archiveLocalMeetingsButton) {
+    archiveLocalMeetingsButton.addEventListener('click', () => {
+      handleArchiveLocalMeetingCopy();
     });
   }
 
