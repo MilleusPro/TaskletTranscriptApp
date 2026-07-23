@@ -191,6 +191,10 @@ function isCurrentUserAdmin() {
   return Boolean(authState.profile && authState.profile.role === 'admin');
 }
 
+function canExposeParserDebug() {
+  return isCurrentUserAdmin();
+}
+
 async function loadAuthenticatedProfile(user) {
   const fallbackProfile = createDefaultProfileFromUser(user);
   if (!supabaseClient || !user || !user.id) {
@@ -615,6 +619,7 @@ async function setAppAuthenticated(user) {
   ++cloudMeetingsLoadToken;
   ++cloudActionOverridesLoadToken;
   ++cloudSettingsLoadToken;
+  const previousUserId = authState.user && authState.user.id ? authState.user.id : '';
 
   if (appShell) {
     appShell.hidden = true;
@@ -627,6 +632,11 @@ async function setAppAuthenticated(user) {
   clearCloudActionOverrideState();
   clearCloudSettingsState();
 
+  const nextUserId = authState.user && authState.user.id ? authState.user.id : '';
+  if (!nextUserId || nextUserId !== previousUserId) {
+    resetImportParserDebugState();
+  }
+
   if (!authState.user) {
     clearAuthenticatedProfileState();
   } else {
@@ -637,6 +647,9 @@ async function setAppAuthenticated(user) {
 
     authState.profile = profileResult.profile;
     authState.profileWarning = profileResult.warning;
+    if (!isCurrentUserAdmin()) {
+      resetImportParserDebugState();
+    }
     authState.status = 'Loading workspace...';
     updateAuthView();
     await loadAuthenticatedCloudData();
@@ -811,6 +824,30 @@ function createEmptyExtractedSections() {
     commercialNotes: [],
     cleanedTranscript: '',
     extraSections: []
+  };
+}
+
+function createEmptyImportParserDebug() {
+  return {
+    blocks: [],
+    metadata: {},
+    headings: []
+  };
+}
+
+function resetImportParserDebugState() {
+  state.importParserDebug = createEmptyImportParserDebug();
+}
+
+function getImportParserDebugForCurrentUser() {
+  if (!canExposeParserDebug()) {
+    return createEmptyImportParserDebug();
+  }
+
+  return {
+    blocks: Array.isArray(state.importParserDebug.blocks) ? state.importParserDebug.blocks : [],
+    metadata: isPlainObject(state.importParserDebug.metadata) ? state.importParserDebug.metadata : {},
+    headings: Array.isArray(state.importParserDebug.headings) ? state.importParserDebug.headings : []
   };
 }
 
@@ -1282,9 +1319,14 @@ function parseTranscriptMetadata(extractedText, extractedHtml) {
 function extractTranscriptSections(extractedText, extractedHtml) {
   const sections = createEmptyExtractedSections();
   const blocks = extractTextBlocks(extractedText, extractedHtml);
+  const shouldExposeDebug = canExposeParserDebug();
 
-  state.importParserDebug.blocks = blocks;
-  state.importParserDebug.headings = [];
+  if (shouldExposeDebug) {
+    state.importParserDebug.blocks = blocks;
+    state.importParserDebug.headings = [];
+  } else {
+    resetImportParserDebugState();
+  }
 
   if (!extractedText && !extractedHtml) {
     return sections;
@@ -1364,7 +1406,9 @@ function extractTranscriptSections(extractedText, extractedHtml) {
   });
 
   closeActiveExtraSection();
-  state.importParserDebug.headings = debugHeadings;
+  if (shouldExposeDebug) {
+    state.importParserDebug.headings = debugHeadings;
+  }
 
   if (!sections.cleanedTranscript) {
     sections.cleanedTranscript = String(extractedText || extractedHtml).trim();
@@ -2053,11 +2097,7 @@ const state = {
   importExtractedText: '',
   importExtractedHtml: '',
   importExtractedSections: createEmptyExtractedSections(),
-  importParserDebug: {
-    blocks: [],
-    metadata: {},
-    headings: []
-  },
+  importParserDebug: createEmptyImportParserDebug(),
   dataManagementError: '',
   dataManagementSuccess: '',
   dataManagementLastExportAt: '',
@@ -5294,21 +5334,25 @@ function renderImport() {
     </div>
   ` : '';
 
-  const debugBlocks = state.importParserDebug.blocks.map((block) => `
+  const shouldRenderParserDebug = reviewVisible && canExposeParserDebug();
+  const parserDebug = getImportParserDebugForCurrentUser();
+
+  const debugBlocks = parserDebug.blocks.map((block) => `
     <li><strong>${escapeHtml(block.type)}</strong>: ${escapeHtml(block.text)}</li>
   `).join('');
 
-  const debugMetadata = Object.entries(state.importParserDebug.metadata).map(([key, value]) => `
+  const debugMetadata = Object.entries(parserDebug.metadata).map(([key, value]) => `
     <li><strong>${escapeHtml(key)}</strong>: ${escapeHtml(value)}</li>
   `).join('');
 
-  const debugHeadings = state.importParserDebug.headings.map((heading) => `
+  const debugHeadings = parserDebug.headings.map((heading) => `
     <li><strong>${escapeHtml(heading.heading)}</strong> → ${escapeHtml(heading.section || 'unrecognized')}</li>
   `).join('');
 
-  const debugPanel = reviewVisible ? `
+  const debugPanel = shouldRenderParserDebug ? `
     <details class="parser-debug">
       <summary>Parser debug</summary>
+      <p class="entity-meta">Administrator diagnostic tool</p>
       <div class="parser-debug-block">
         <h5>Text blocks</h5>
         <ul>${debugBlocks}</ul>
@@ -5489,6 +5533,7 @@ async function handleImportFileSelection(file) {
   state.importExtractedText = '';
   state.importExtractedHtml = '';
   state.importExtractedSections = createEmptyExtractedSections();
+  resetImportParserDebugState();
   state.importReview = createEmptyImportReview();
 
   const fileValidation = getValidatedImportDocxFile(file);
@@ -5511,7 +5556,9 @@ async function handleImportFileSelection(file) {
     state.importExtractedHtml = extractionResult.html || '';
     state.importExtractedSections = extractTranscriptSections(state.importExtractedText, state.importExtractedHtml);
     const metadata = parseTranscriptMetadata(state.importExtractedText, state.importExtractedHtml);
-    state.importParserDebug.metadata = metadata;
+    if (canExposeParserDebug()) {
+      state.importParserDebug.metadata = metadata;
+    }
     applyExtractedMetadataToReview(state.importExtractedText, state.importExtractedHtml);
     state.importExtracting = false;
     renderViews();
@@ -5519,6 +5566,7 @@ async function handleImportFileSelection(file) {
   } catch (error) {
     state.importExtracting = false;
     state.importExtractionError = error.message || 'The document could not be processed.';
+    resetImportParserDebugState();
     renderViews();
     updateImportSaveButtonState();
   }
@@ -5656,6 +5704,7 @@ async function handleSaveMeeting() {
   state.importExtractedText = '';
   state.importExtractedHtml = '';
   state.importExtractedSections = createEmptyExtractedSections();
+  resetImportParserDebugState();
   state.importSuccessMessage = `Meeting saved successfully as ${savedMeeting.title}.`;
   state.importSaveInProgress = false;
   state.importSaveStatus = '';
