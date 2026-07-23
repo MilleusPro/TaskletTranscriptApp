@@ -967,6 +967,121 @@ textarea:disabled {
   overflow: hidden;
 }
 
+.action-ownership-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.action-ownership-select-wrap {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.action-ownership-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  padding-right: 26px;
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-size: 5px 5px, 5px 5px;
+  cursor: pointer;
+}
+
+.action-ownership-select:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+
+.action-ownership-badge--tasklet {
+  color: #1f6d49;
+  background: #e8f7ee;
+  border-color: #c2e7d2;
+}
+
+.action-ownership-badge--partner {
+  color: #2b5d94;
+  background: #e9f1fb;
+  border-color: #bfd2ee;
+}
+
+.action-ownership-badge--customer {
+  color: #8c640f;
+  background: #fbf1d9;
+  border-color: #e4cc93;
+}
+
+.action-ownership-badge--unassigned {
+  color: #5f718a;
+  background: #edf1f5;
+  border-color: #d2dce6;
+}
+
+.action-compact-row--ownership-tasklet {
+  border-left: 4px solid #8fe3b3;
+}
+
+.action-compact-row--ownership-partner {
+  border-left: 4px solid #8cb4df;
+}
+
+.action-compact-row--ownership-customer {
+  border-left: 4px solid #e2c16e;
+}
+
+.action-compact-row--ownership-unassigned {
+  border-left: 4px solid #c8d2dc;
+}
+
+.action-card--ownership-tasklet {
+  border-left: 4px solid #8fe3b3;
+}
+
+.action-card--ownership-partner {
+  border-left: 4px solid #8cb4df;
+}
+
+.action-card--ownership-customer {
+  border-left: 4px solid #e2c16e;
+}
+
+.action-card--ownership-unassigned {
+  border-left: 4px solid #c8d2dc;
+}
+
+.action-compact-title-row,
+.action-card-heading-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.action-compact-title-row .action-ownership-select,
+.action-card-heading-row .action-ownership-select {
+  min-width: 88px;
+}
+
+.action-card-heading-row h4,
+.action-compact-title-row h4 {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.action-compact-title-row {
+  margin-bottom: 4px;
+}
+
 .action-card-row {
   display: flex;
   flex-wrap: wrap;
@@ -993,6 +1108,257 @@ textarea:disabled {
   gap: var(--space-2);
   margin-top: 0;
   font-size: 14px;
+}
+
+.action-command-center {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.action-command-center .section-heading {
+  align-items: flex-start;
+}
+
+.action-view-toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.action-view-toggle,
+.action-tab {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.action-view-toggle.active,
+.action-tab.active {
+  border-color: #9fd5b5;
+  background: #edf9f2;
+}
+
+.action-tab span {
+  margin-left: 6px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.action-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.action-secondary-filters {
+  display: grid;
+  gap: 10px;
+}
+
+.action-secondary-filters--primary {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  align-items: end;
+}
+
+.action-toolbar-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.action-toolbar-field .sort-select,
+.action-toolbar-reset {
+  width: 100%;
+  min-width: 0;
+}
+
+.action-toolbar-reset {
+  align-self: end;
+}
+
+.action-list--command-center {
+  gap: var(--space-3);
+}
+
+.action-compact-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.action-compact-row {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  padding: 10px 10px 10px 12px;
+}
+
+.action-compact-row--overdue {
+  border-color: #efb6b5;
+  background: #fff9f9;
+}
+
+.action-compact-row--soon {
+  border-color: #f0dbad;
+  background: #fffdf7;
+}
+
+.action-compact-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.9fr) minmax(116px, 140px) minmax(120px, 148px);
+  gap: 10px 12px;
+  align-items: start;
+}
+
+.action-compact-primary h4 {
+  margin-bottom: 4px;
+  font-size: 15px;
+}
+
+.action-compact-primary {
+  min-width: 0;
+}
+
+.action-compact-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.action-compact-primary-button {
+  display: inline-flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.action-compact-primary-button:hover {
+  background: var(--bg-hover);
+}
+
+.action-compact-primary-button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-color: #9fd5b5;
+  background: #f2fbf5;
+}
+
+.action-compact-button-content {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.action-compact-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.action-compact-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.action-compact-cue {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.action-compact-button-meta,
+.action-compact-source {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.action-compact-chevron {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+}
+
+.action-compact-meta,
+.action-compact-source {
+  font-size: 13px;
+}
+
+.action-compact-meta {
+  margin-bottom: 2px;
+  color: var(--text-muted);
+}
+
+.action-compact-status-group,
+.action-compact-date-group {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+}
+
+.action-compact-status-group .sort-select,
+.action-compact-date-group .sort-select {
+  max-width: none;
+}
+
+.compact-field-label {
+  margin-bottom: 0;
+}
+
+.secondary-button--compact {
+  min-height: 36px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.action-compact-expanded {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 4px;
+}
+
+.action-compact-expanded-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.action-compact-expanded p {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.action-compact-expanded strong {
+  color: var(--text-primary);
+}
+
+.action-due-date--soon {
+  color: var(--color-warning);
 }
 
 .entity-account-panel {
@@ -1751,6 +2117,24 @@ textarea:disabled {
   .entity-grid--participants {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .action-secondary-filters,
+  .action-secondary-filters--primary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .action-card-heading-row,
+  .action-compact-title-row {
+    align-items: flex-start;
+  }
+
+  .action-ownership-select {
+    min-width: 0;
+  }
+
+  .action-compact-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(112px, 130px) minmax(120px, 140px);
+  }
 }
 
 @media (max-width: 760px) {
@@ -1795,6 +2179,49 @@ textarea:disabled {
   .action-card-row--controls {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .action-view-toggle-row,
+  .action-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2);
+  }
+
+  .action-compact-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .action-compact-primary-button {
+    width: 100%;
+  }
+
+  .action-compact-title {
+    white-space: normal;
+  }
+
+  .secondary-button--compact {
+    width: 100%;
+  }
+
+  .action-card-heading-row,
+  .action-compact-title-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .action-secondary-filters,
+  .action-secondary-filters--primary {
+    grid-template-columns: 1fr;
+  }
+
+  .action-ownership-select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .action-toolbar-reset {
+    grid-column: auto;
   }
 
   .entity-action-row,

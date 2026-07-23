@@ -23,13 +23,18 @@ const SETTINGS_STORAGE_KEY = 'taskletTranscriptApp.settings';
 const BACKUP_APP_NAME = 'Tasklet Transcript App';
 const BACKUP_VERSION = 1;
 const ACTION_STATUSES = ['Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled'];
-const ACTION_FILTERS = ['All', 'Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled', 'Overdue', 'No due date'];
+const ACTION_FILTERS = ['Active', 'Overdue', 'Open', 'In Progress', 'Waiting', 'Completed', 'All', 'Waiting for Customer', 'Waiting Internally', 'Cancelled', 'No due date'];
 const ENTITY_DETAIL_ACTION_FILTERS = ['Active', 'Open', 'Waiting', 'Completed', 'All'];
+const ACTION_VIEW_OPTIONS = ['compact', 'cards'];
+const ACTION_HEADLINE_TABS = ['Active', 'Overdue', 'Open', 'In Progress', 'Waiting', 'Completed', 'All'];
+const GLOBAL_ACTION_SORT_OPTIONS = ['Priority', 'Due date', 'Newest', 'Oldest', 'Customer', 'Partner'];
+const GLOBAL_ACTION_DUE_FILTER_OPTIONS = ['Any due date', 'Overdue', 'Due today', 'Due this week', 'No due date'];
 const SORT_ORDER_OPTIONS = ['newest', 'oldest'];
-const SUPPORTED_APPLICATION_SETTING_KEYS = ['sortOrder', 'actionFilter'];
+const SUPPORTED_APPLICATION_SETTING_KEYS = ['sortOrder', 'actionFilter', 'actionView'];
 const APPLICATION_SETTING_LABELS = {
   sortOrder: 'Meeting sort order',
-  actionFilter: 'Action filter'
+  actionFilter: 'Action filter',
+  actionView: 'Action view'
 };
 const SEARCH_MIN_CHARS = 2;
 const SEARCH_DEBOUNCE_MS = 180;
@@ -43,6 +48,7 @@ const ACTION_OVERRIDE_ROW_COLUMNS = [
   'action_id',
   'status',
   'due_date',
+  'responsibility',
   'created_at',
   'updated_at'
 ].join(', ');
@@ -330,26 +336,50 @@ function clearCloudActionOverrideState() {
 function getDefaultApplicationSettings() {
   return {
     sortOrder: 'newest',
-    actionFilter: 'All'
+    actionFilter: 'Active',
+    actionView: 'compact'
   };
 }
 
 function sanitizeApplicationSettings(value) {
   const source = isPlainObject(value) ? value : {};
   const defaults = getDefaultApplicationSettings();
+  const normalizeActionFilterSetting = (rawFilter) => {
+    if (!ACTION_FILTERS.includes(rawFilter)) {
+      return defaults.actionFilter;
+    }
+
+    if (rawFilter === 'Waiting for Customer' || rawFilter === 'Waiting Internally') {
+      return 'Waiting';
+    }
+
+    if (rawFilter === 'Cancelled') {
+      return 'Completed';
+    }
+
+    if (rawFilter === 'No due date') {
+      return 'All';
+    }
+
+    return rawFilter;
+  };
+
   const sortOrder = SORT_ORDER_OPTIONS.includes(source.sortOrder) ? source.sortOrder : defaults.sortOrder;
-  const actionFilter = ACTION_FILTERS.includes(source.actionFilter) ? source.actionFilter : defaults.actionFilter;
+  const actionFilter = normalizeActionFilterSetting(source.actionFilter);
+  const actionView = ACTION_VIEW_OPTIONS.includes(source.actionView) ? source.actionView : defaults.actionView;
 
   return {
     sortOrder,
-    actionFilter
+    actionFilter,
+    actionView
   };
 }
 
 function buildCurrentApplicationSettings() {
   return sanitizeApplicationSettings({
     sortOrder: state.sortOrder,
-    actionFilter: state.actionFilter
+    actionFilter: state.actionFilter,
+    actionView: state.actionView
   });
 }
 
@@ -357,6 +387,7 @@ function applyApplicationSettings(settings) {
   const sanitized = sanitizeApplicationSettings(settings);
   state.sortOrder = sanitized.sortOrder;
   state.actionFilter = sanitized.actionFilter;
+  state.actionView = sanitized.actionView;
   state.savedSettings = sanitized;
 }
 
@@ -405,6 +436,9 @@ function getDetectedSupportedSettingKeys(rawSettings) {
   }
   if (Object.prototype.hasOwnProperty.call(rawSettings, 'actionFilter') && ACTION_FILTERS.includes(rawSettings.actionFilter)) {
     detected.push('actionFilter');
+  }
+  if (Object.prototype.hasOwnProperty.call(rawSettings, 'actionView') && ACTION_VIEW_OPTIONS.includes(rawSettings.actionView)) {
+    detected.push('actionView');
   }
 
   return detected;
@@ -2142,15 +2176,17 @@ function sanitizeActionOverrideRecord(record) {
 
   const status = ACTION_STATUSES.includes(record.status) ? record.status : '';
   const dueDate = normalizeExtractedDate(record.dueDate || '');
+  const responsibility = normalizeActionResponsibilityValue(record.responsibility);
 
-  if (!status && !dueDate) {
+  if (!status && !dueDate && responsibility === null) {
     return null;
   }
 
   return {
     actionId,
     status,
-    dueDate
+    dueDate,
+    responsibility
   };
 }
 
@@ -2348,7 +2384,8 @@ function mapActionOverrideRowToOverride(row) {
   return sanitizeActionOverrideRecord({
     actionId: row.action_id,
     status: row.status,
-    dueDate: row.due_date
+    dueDate: row.due_date,
+    responsibility: row.responsibility
   });
 }
 
@@ -2366,6 +2403,7 @@ function mapActionOverrideToDatabaseRow(override, authenticatedUserId, meetingId
     action_id: sanitizedOverride.actionId,
     status: sanitizedOverride.status || null,
     due_date: sanitizedOverride.dueDate || null,
+    responsibility: sanitizedOverride.responsibility || null,
     created_at: now,
     updated_at: now
   };
@@ -2727,7 +2765,13 @@ const state = {
   selectedPartnerKey: null,
   selectedParticipantKey: null,
   meetingReturnContext: null,
-  actionFilter: 'All',
+  actionFilter: 'Active',
+  actionView: 'compact',
+  actionsCustomerFilter: 'All customers',
+  actionsPartnerFilter: 'All partners',
+  actionsDueDateFilter: 'Any due date',
+  actionsSortBy: 'Priority',
+  actionsExpandedById: {},
   customerDetailActionFiltersByKey: {},
   partnerDetailActionFiltersByKey: {},
   customerDetailShowAllMeetingsByKey: {},
@@ -2782,6 +2826,43 @@ const state = {
   meetingDocumentDownloadError: '',
   meetingDeletionWarning: ''
 };
+
+function normalizeActionResponsibilityValue(value) {
+  const normalized = normalizeCompanyName(value).toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+
+  return ['tasklet', 'partner', 'customer', 'unassigned'].includes(normalized)
+    ? normalized
+    : null;
+}
+
+function isDefaultActionResponsibility(value) {
+  return normalizeActionResponsibilityValue(value) === 'unassigned';
+}
+
+function getActionAutomaticResponsibility(action) {
+  return getActionOwnershipCategory(action);
+}
+
+function getActionExplicitResponsibility(action) {
+  const override = getActionOverride(action && action.id);
+  return override ? normalizeActionResponsibilityValue(override.responsibility) : null;
+}
+
+function getActionDisplayedResponsibility(action) {
+  const explicitResponsibility = getActionExplicitResponsibility(action);
+  if (explicitResponsibility) {
+    return explicitResponsibility;
+  }
+
+  return getActionAutomaticResponsibility(action) || 'unassigned';
+}
+
+function getActionResponsibilitySelectValue(action) {
+  return getActionDisplayedResponsibility(action);
+}
 
 function getEntityFilterStateBucket(entityType) {
   return entityType === 'customer'
@@ -4185,10 +4266,11 @@ function getActionById(actionId) {
   return getCombinedActions().find((action) => action.id === actionId) || null;
 }
 
-function isDefaultActionOverride(status, dueDate) {
+function isDefaultActionOverride(status, dueDate, responsibility) {
   const normalizedStatus = ACTION_STATUSES.includes(status) ? status : '';
   const normalizedDueDate = normalizeExtractedDate(dueDate || '');
-  return (!normalizedStatus || normalizedStatus === 'Open') && !normalizedDueDate;
+  const normalizedResponsibility = normalizeActionResponsibilityValue(responsibility);
+  return (!normalizedStatus || normalizedStatus === 'Open') && !normalizedDueDate && normalizedResponsibility === null;
 }
 
 function getEffectiveActionStatus(defaultStatus, override) {
@@ -4231,6 +4313,8 @@ function getCombinedActions() {
         dueDate: getEffectiveActionDueDate('', override),
         sourceMeetingId: meeting.id,
         sourceMeetingTitle: meeting.title || 'Imported meeting',
+        sourceMeetingDate: meeting.date || '',
+        sourceMeetingCreatedAt: meeting.createdAt || '',
         customer: getMeetingDisplayCustomer(meeting),
         partner: getMeetingDisplayPartner(meeting),
         sourceType: 'imported'
@@ -4373,6 +4457,459 @@ function getEntityActionFilterCounts(actions) {
   return counts;
 }
 
+function getCleanActionCustomerLabel(action) {
+  return cleanupEntityDisplayName(action && action.customer ? action.customer : 'Unassigned') || 'Unassigned';
+}
+
+function getCleanActionPartnerLabel(action) {
+  return cleanupEntityDisplayName(action && action.partner ? action.partner : 'Unassigned') || 'Unassigned';
+}
+
+function getActionOwnershipCategoryLabel(categoryKey) {
+  const labels = {
+    tasklet: 'Tasklet',
+    partner: 'Partner',
+    customer: 'Customer',
+    unassigned: 'Unassigned'
+  };
+
+  return labels[categoryKey] || 'Unassigned';
+}
+
+function getActionOwnershipCategoryClass(categoryKey) {
+  return `action-ownership-badge--${categoryKey}`;
+}
+
+function isGenericActionOwner(ownerKey) {
+  if (!ownerKey) {
+    return true;
+  }
+
+  return [
+    'unassigned',
+    'unknown',
+    'tbd',
+    'to be decided',
+    'to be assigned',
+    'n/a',
+    'na',
+    'none',
+    'generic',
+    'owner',
+    'partner',
+    'customer',
+    'team'
+  ].includes(ownerKey);
+}
+
+function isTaskletOwnershipText(ownerKey) {
+  if (!ownerKey) {
+    return false;
+  }
+
+  return ownerKey === 'niels-christian eklund' || ownerKey === 'niels christian eklund' || ownerKey.includes('tasklet');
+}
+
+function matchesOwnershipEntity(ownerKey, entityLabel) {
+  if (!ownerKey || !entityLabel) {
+    return false;
+  }
+
+  return ownerKey === normalizeCompanyName(entityLabel).toLowerCase();
+}
+
+function getActionOwnershipCategory(action) {
+  const ownerText = normalizeCompanyName(action && action.owner ? action.owner : '');
+  const ownerKey = ownerText.toLowerCase();
+
+  if (!ownerText || isGenericActionOwner(ownerKey)) {
+    return 'unassigned';
+  }
+
+  if (isTaskletOwnershipText(ownerKey)) {
+    return 'tasklet';
+  }
+
+  const meeting = action && action.sourceMeetingId ? getMeetingById(action.sourceMeetingId) : null;
+  const customerLabel = meeting ? cleanupEntityDisplayName(getMeetingDisplayCustomer(meeting)) : '';
+  const partnerLabel = meeting ? cleanupEntityDisplayName(getMeetingDisplayPartner(meeting)) : '';
+
+  if (matchesOwnershipEntity(ownerKey, partnerLabel)) {
+    return 'partner';
+  }
+
+  if (matchesOwnershipEntity(ownerKey, customerLabel)) {
+    return 'customer';
+  }
+
+  if (!meeting) {
+    return 'unassigned';
+  }
+
+  const participants = extractParticipantRecordsFromMeeting(meeting);
+  for (const participant of participants) {
+    const participantNameKey = normalizeCompanyName(participant.name).toLowerCase();
+    if (participantNameKey !== ownerKey) {
+      continue;
+    }
+
+    const participantCompany = cleanupEntityDisplayName(participant.company || '');
+    const participantCompanyKey = normalizeCompanyName(participantCompany).toLowerCase();
+    if (isTaskletOwnershipText(participantCompanyKey)) {
+      return 'tasklet';
+    }
+
+    if (matchesOwnershipEntity(participantCompanyKey, partnerLabel)) {
+      return 'partner';
+    }
+
+    if (matchesOwnershipEntity(participantCompanyKey, customerLabel)) {
+      return 'customer';
+    }
+  }
+
+  return 'unassigned';
+}
+
+function renderActionOwnershipBadge(action) {
+  const responsibilityValue = getActionResponsibilitySelectValue(action);
+  const responsibilityLabel = getActionOwnershipCategoryLabel(responsibilityValue);
+  const optionMarkup = ['tasklet', 'partner', 'customer', 'unassigned'].map((value) => `
+    <option value="${escapeHtml(value)}" ${value === responsibilityValue ? 'selected' : ''}>${escapeHtml(getActionOwnershipCategoryLabel(value))}</option>
+  `).join('');
+
+  return `
+    <label class="action-ownership-select-wrap" for="action-responsibility-${escapeHtml(action.id)}">
+      <span class="sr-only">Action responsibility</span>
+      <select
+        id="action-responsibility-${escapeHtml(action.id)}"
+        class="action-ownership-select action-ownership-badge action-ownership-badge--${escapeHtml(responsibilityValue)} js-action-responsibility"
+        data-action-id="${escapeHtml(action.id)}"
+        data-current-responsibility="${escapeHtml(responsibilityValue)}"
+      >${optionMarkup}</select>
+    </label>
+  `;
+}
+
+function getActionOwnerLabel(action) {
+  return normalizeCompanyName(action && action.owner ? action.owner : '') || 'Unassigned';
+}
+
+function getActionSourceMeetingDateValue(action) {
+  if (action && action.sourceMeetingDate) {
+    return action.sourceMeetingDate;
+  }
+
+  if (!action || !action.sourceMeetingId) {
+    return '';
+  }
+
+  const sourceMeeting = getMeetingById(action.sourceMeetingId);
+  return sourceMeeting && sourceMeeting.date ? sourceMeeting.date : '';
+}
+
+function getActionSourceMeetingTimestamp(action) {
+  const meetingDate = getActionSourceMeetingDateValue(action);
+  if (meetingDate) {
+    const meetingTimestamp = new Date(`${meetingDate}T00:00:00`).getTime();
+    if (Number.isFinite(meetingTimestamp)) {
+      return meetingTimestamp;
+    }
+  }
+
+  if (action && action.createdAt) {
+    const createdTimestamp = new Date(action.createdAt).getTime();
+    if (Number.isFinite(createdTimestamp)) {
+      return createdTimestamp;
+    }
+  }
+
+  return 0;
+}
+
+function getActionDueDateSortValue(action) {
+  return action && action.dueDate ? action.dueDate : '9999-12-31';
+}
+
+function getActionPriorityRank(action) {
+  if (isActionClosed(action)) {
+    return 5;
+  }
+
+  if (isActionOverdue(action)) {
+    return 1;
+  }
+
+  if (isActiveActionStatus(action.status) && action.dueDate === getTodayDateString()) {
+    return 2;
+  }
+
+  if (isActiveActionStatus(action.status) && action.dueDate) {
+    return 3;
+  }
+
+  return 4;
+}
+
+function getDueThisWeekRange() {
+  const currentDate = new Date();
+  const day = currentDate.getDay();
+  const mondayOffset = day === 0 ? -6 : 1 - day;
+  const monday = new Date(currentDate);
+  monday.setHours(0, 0, 0, 0);
+  monday.setDate(currentDate.getDate() + mondayOffset);
+
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+
+  const toDateString = (value) => {
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, '0');
+    const dayOfMonth = String(value.getDate()).padStart(2, '0');
+    return `${year}-${month}-${dayOfMonth}`;
+  };
+
+  return {
+    start: toDateString(monday),
+    end: toDateString(sunday)
+  };
+}
+
+function matchesGlobalActionMainFilter(action, selectedFilter) {
+  const effectiveFilter = ACTION_FILTERS.includes(selectedFilter) ? selectedFilter : 'Active';
+
+  if (effectiveFilter === 'All') {
+    return true;
+  }
+
+  if (effectiveFilter === 'Active') {
+    return isActiveActionStatus(action.status);
+  }
+
+  if (effectiveFilter === 'Overdue') {
+    return isActionOverdue(action);
+  }
+
+  if (effectiveFilter === 'Open') {
+    return action.status === 'Open';
+  }
+
+  if (effectiveFilter === 'In Progress') {
+    return action.status === 'In Progress';
+  }
+
+  if (effectiveFilter === 'Waiting') {
+    return isWaitingActionStatus(action.status);
+  }
+
+  if (effectiveFilter === 'Completed') {
+    return action.status === 'Completed' || action.status === 'Cancelled';
+  }
+
+  if (effectiveFilter === 'No due date') {
+    return !action.dueDate;
+  }
+
+  return action.status === effectiveFilter;
+}
+
+function getGlobalActionMainFilterCounts(actions) {
+  const counts = {
+    Active: 0,
+    Overdue: 0,
+    Open: 0,
+    'In Progress': 0,
+    Waiting: 0,
+    Completed: 0,
+    All: actions.length
+  };
+
+  actions.forEach((action) => {
+    if (isActiveActionStatus(action.status)) {
+      counts.Active += 1;
+    }
+    if (isActionOverdue(action)) {
+      counts.Overdue += 1;
+    }
+    if (action.status === 'Open') {
+      counts.Open += 1;
+    }
+    if (action.status === 'In Progress') {
+      counts['In Progress'] += 1;
+    }
+    if (isWaitingActionStatus(action.status)) {
+      counts.Waiting += 1;
+    }
+    if (action.status === 'Completed' || action.status === 'Cancelled') {
+      counts.Completed += 1;
+    }
+  });
+
+  return counts;
+}
+
+function buildGlobalActionFilterOptions(actions) {
+  const customers = new Set();
+  const partners = new Set();
+
+  actions.forEach((action) => {
+    const customer = getCleanActionCustomerLabel(action);
+    const partner = getCleanActionPartnerLabel(action);
+    if (customer !== 'Unassigned') {
+      customers.add(customer);
+    }
+    if (partner !== 'Unassigned') {
+      partners.add(partner);
+    }
+  });
+
+  return {
+    customers: ['All customers', 'Unassigned', ...Array.from(customers).sort((a, b) => a.localeCompare(b))],
+    partners: ['All partners', 'Unassigned', ...Array.from(partners).sort((a, b) => a.localeCompare(b))]
+  };
+}
+
+function matchesDueDateSecondaryFilter(action, dueFilter) {
+  if (!GLOBAL_ACTION_DUE_FILTER_OPTIONS.includes(dueFilter) || dueFilter === 'Any due date') {
+    return true;
+  }
+
+  if (dueFilter === 'Overdue') {
+    return isActionOverdue(action);
+  }
+
+  if (dueFilter === 'No due date') {
+    return !action.dueDate;
+  }
+
+  if (!action.dueDate) {
+    return false;
+  }
+
+  if (dueFilter === 'Due today') {
+    return action.dueDate === getTodayDateString();
+  }
+
+  if (dueFilter === 'Due this week') {
+    const weekRange = getDueThisWeekRange();
+    return action.dueDate >= weekRange.start && action.dueDate <= weekRange.end;
+  }
+
+  return true;
+}
+
+function matchesGlobalActionSecondaryFilters(action) {
+  if (state.actionsCustomerFilter !== 'All customers' && getCleanActionCustomerLabel(action) !== state.actionsCustomerFilter) {
+    return false;
+  }
+
+  if (state.actionsPartnerFilter !== 'All partners' && getCleanActionPartnerLabel(action) !== state.actionsPartnerFilter) {
+    return false;
+  }
+
+  if (!matchesDueDateSecondaryFilter(action, state.actionsDueDateFilter)) {
+    return false;
+  }
+
+  return true;
+}
+
+function hasActiveGlobalSecondaryFilters() {
+  return state.actionsCustomerFilter !== 'All customers'
+    || state.actionsPartnerFilter !== 'All partners'
+    || state.actionsDueDateFilter !== 'Any due date';
+}
+
+function sortGlobalActions(actions, sortBy) {
+  const selectedSort = GLOBAL_ACTION_SORT_OPTIONS.includes(sortBy) ? sortBy : 'Priority';
+
+  return [...actions].sort((first, second) => {
+    if (selectedSort === 'Priority') {
+      const firstPriority = getActionPriorityRank(first);
+      const secondPriority = getActionPriorityRank(second);
+      if (firstPriority !== secondPriority) {
+        return firstPriority - secondPriority;
+      }
+
+      if (firstPriority <= 3) {
+        const dueCompare = getActionDueDateSortValue(first).localeCompare(getActionDueDateSortValue(second));
+        if (dueCompare !== 0) {
+          return dueCompare;
+        }
+      }
+
+      const timestampCompare = getActionSourceMeetingTimestamp(second) - getActionSourceMeetingTimestamp(first);
+      if (timestampCompare !== 0) {
+        return timestampCompare;
+      }
+
+      return first.description.localeCompare(second.description);
+    }
+
+    if (selectedSort === 'Due date') {
+      const dueCompare = getActionDueDateSortValue(first).localeCompare(getActionDueDateSortValue(second));
+      if (dueCompare !== 0) {
+        return dueCompare;
+      }
+      return first.description.localeCompare(second.description);
+    }
+
+    if (selectedSort === 'Newest') {
+      return getActionSourceMeetingTimestamp(second) - getActionSourceMeetingTimestamp(first);
+    }
+
+    if (selectedSort === 'Oldest') {
+      return getActionSourceMeetingTimestamp(first) - getActionSourceMeetingTimestamp(second);
+    }
+
+    if (selectedSort === 'Customer') {
+      const customerCompare = getCleanActionCustomerLabel(first).localeCompare(getCleanActionCustomerLabel(second));
+      if (customerCompare !== 0) {
+        return customerCompare;
+      }
+      return first.description.localeCompare(second.description);
+    }
+
+    if (selectedSort === 'Partner') {
+      const partnerCompare = getCleanActionPartnerLabel(first).localeCompare(getCleanActionPartnerLabel(second));
+      if (partnerCompare !== 0) {
+        return partnerCompare;
+      }
+      return first.description.localeCompare(second.description);
+    }
+
+    return 0;
+  });
+}
+
+function getGlobalActionGroupLabel(action, groupBy) {
+  if (groupBy === 'Customer') {
+    return getCleanActionCustomerLabel(action);
+  }
+
+  if (groupBy === 'Partner') {
+    return getCleanActionPartnerLabel(action);
+  }
+
+  if (groupBy === 'Owner') {
+    return getActionOwnerLabel(action);
+  }
+
+  if (groupBy === 'Status') {
+    if (action.status === 'Waiting for Customer' || action.status === 'Waiting Internally') {
+      return 'Waiting';
+    }
+
+    if (action.status === 'Cancelled') {
+      return 'Completed';
+    }
+
+    return action.status || 'Unassigned';
+  }
+
+  return 'All actions';
+}
+
 async function saveApplicationSettingsToSupabase(nextSettings) {
   if (!supabaseClient || !authState.user || !authState.user.id) {
     return {
@@ -4461,11 +4998,12 @@ async function updateActionOverride(actionId, update) {
     return false;
   }
 
-  const currentOverride = state.actionOverrides[actionId] || { actionId, status: '', dueDate: '' };
+  const currentOverride = state.actionOverrides[actionId] || { actionId, status: '', dueDate: '', responsibility: null };
   const nextOverride = {
     actionId,
     status: currentOverride.status || '',
-    dueDate: currentOverride.dueDate || ''
+    dueDate: currentOverride.dueDate || '',
+    responsibility: normalizeActionResponsibilityValue(currentOverride.responsibility)
   };
 
   if (Object.prototype.hasOwnProperty.call(update, 'status')) {
@@ -4476,9 +5014,13 @@ async function updateActionOverride(actionId, update) {
     nextOverride.dueDate = normalizeExtractedDate(update.dueDate || '');
   }
 
+  if (Object.prototype.hasOwnProperty.call(update, 'responsibility')) {
+    nextOverride.responsibility = normalizeActionResponsibilityValue(update.responsibility);
+  }
+
   state.actionOverridesError = '';
 
-  if (isDefaultActionOverride(nextOverride.status, nextOverride.dueDate)) {
+  if (isDefaultActionOverride(nextOverride.status, nextOverride.dueDate, nextOverride.responsibility)) {
     const { error } = await supabaseClient
       .from('action_overrides')
       .delete()
@@ -5733,35 +6275,186 @@ function renderParticipants() {
 }
 
 function renderActions() {
-  const combinedActions = sortCombinedActions(getCombinedActions());
-  const selectedFilter = ACTION_FILTERS.includes(state.actionFilter) ? state.actionFilter : 'All';
-  const visibleActions = filterCombinedActions(combinedActions, selectedFilter);
+  const combinedActions = getCombinedActions();
+  const selectedMainFilter = ACTION_FILTERS.includes(state.actionFilter) ? state.actionFilter : 'Active';
+  const tabCounts = getGlobalActionMainFilterCounts(combinedActions);
+  const options = buildGlobalActionFilterOptions(combinedActions);
+
+  if (!options.customers.includes(state.actionsCustomerFilter)) {
+    state.actionsCustomerFilter = 'All customers';
+  }
+  if (!options.partners.includes(state.actionsPartnerFilter)) {
+    state.actionsPartnerFilter = 'All partners';
+  }
+  if (!GLOBAL_ACTION_DUE_FILTER_OPTIONS.includes(state.actionsDueDateFilter)) {
+    state.actionsDueDateFilter = 'Any due date';
+  }
+  if (!GLOBAL_ACTION_SORT_OPTIONS.includes(state.actionsSortBy)) {
+    state.actionsSortBy = 'Priority';
+  }
+
+  if (Object.prototype.hasOwnProperty.call(state, 'actionsOwnerFilter')) {
+    delete state.actionsOwnerFilter;
+  }
+  if (Object.prototype.hasOwnProperty.call(state, 'actionsGroupBy')) {
+    delete state.actionsGroupBy;
+  }
+  if (Object.prototype.hasOwnProperty.call(state, 'actionsCollapsedGroups')) {
+    delete state.actionsCollapsedGroups;
+  }
+
+  const mainFilteredActions = combinedActions.filter((action) => matchesGlobalActionMainFilter(action, selectedMainFilter));
+  const secondaryFilteredActions = mainFilteredActions.filter((action) => matchesGlobalActionSecondaryFilters(action));
+  const sortedActions = sortGlobalActions(secondaryFilteredActions, state.actionsSortBy);
+  const hasSecondaryFilters = hasActiveGlobalSecondaryFilters();
   const errorMessage = state.actionOverridesError
     ? `<p class="import-error" role="alert">${escapeHtml(state.actionOverridesError)}</p>`
     : '';
-  const list = visibleActions.length
-    ? visibleActions.map((action) => renderActionCard(action, { editable: true, returnSection: 'actions' })).join('')
-    : renderEmptyState('No actions match this filter', 'Try a different status filter or import another meeting.', 'Go to Import Transcript');
 
-  const filterOptions = ACTION_FILTERS.map((filter) => `
-    <option value="${escapeHtml(filter)}" ${filter === selectedFilter ? 'selected' : ''}>${escapeHtml(filter)}</option>
-  `).join('');
+  const viewToggle = ACTION_VIEW_OPTIONS.map((viewName) => {
+    const isSelected = state.actionView === viewName;
+    return `<button class="action-view-toggle js-actions-view-toggle${isSelected ? ' active' : ''}" type="button" data-action-view="${escapeHtml(viewName)}" aria-pressed="${isSelected ? 'true' : 'false'}">${viewName === 'compact' ? 'Compact' : 'Cards'}</button>`;
+  }).join('');
+
+  const tabs = ACTION_HEADLINE_TABS.map((tab) => {
+    const isSelected = selectedMainFilter === tab;
+    return `<button class="action-tab js-action-main-filter${isSelected ? ' active' : ''}" type="button" data-main-filter="${escapeHtml(tab)}" aria-pressed="${isSelected ? 'true' : 'false'}">${escapeHtml(tab)} <span>${tabCounts[tab] || 0}</span></button>`;
+  }).join('');
+
+  const customerOptions = options.customers.map((customer) => `<option value="${escapeHtml(customer)}" ${customer === state.actionsCustomerFilter ? 'selected' : ''}>${escapeHtml(customer)}</option>`).join('');
+  const partnerOptions = options.partners.map((partner) => `<option value="${escapeHtml(partner)}" ${partner === state.actionsPartnerFilter ? 'selected' : ''}>${escapeHtml(partner)}</option>`).join('');
+  const dueDateOptions = GLOBAL_ACTION_DUE_FILTER_OPTIONS.map((dueFilter) => `<option value="${escapeHtml(dueFilter)}" ${dueFilter === state.actionsDueDateFilter ? 'selected' : ''}>${escapeHtml(dueFilter)}</option>`).join('');
+  const sortByOptions = GLOBAL_ACTION_SORT_OPTIONS.map((sortOption) => `<option value="${escapeHtml(sortOption)}" ${sortOption === state.actionsSortBy ? 'selected' : ''}>${escapeHtml(sortOption)}</option>`).join('');
+
+  const listMarkup = sortedActions.length
+    ? sortedActions.map((action) => (state.actionView === 'cards'
+      ? renderActionCard(action, { editable: true, returnSection: 'actions' })
+      : renderCompactActionRow(action))).join('')
+    : renderEmptyState(
+      'No actions match your filters',
+      hasSecondaryFilters
+        ? 'No actions matched the selected secondary filters. Reset filters to broaden results.'
+        : 'No actions matched the selected status tab.'
+    );
 
   return `
-    <section class="panel-card">
+    <section class="panel-card action-command-center">
       <div class="section-heading">
         <div>
           <h3>Actions</h3>
-          <p class="entity-meta">${visibleActions.length} of ${combinedActions.length} actions shown</p>
+          <p class="entity-meta">${sortedActions.length} of ${combinedActions.length} actions shown</p>
         </div>
-        <div class="sort-controls">
-          <label class="sort-label" for="actions-filter">Filter</label>
-          <select id="actions-filter" class="sort-select js-actions-filter">${filterOptions}</select>
+        <div class="action-view-toggle-row" role="group" aria-label="Action view mode">${viewToggle}</div>
+      </div>
+      <div class="action-tabs" role="group" aria-label="Action status tabs">${tabs}</div>
+      <div class="action-secondary-filters action-secondary-filters--primary">
+        <div class="action-toolbar-field">
+          <label class="sort-label" for="actions-customer-filter">Customer</label>
+          <select id="actions-customer-filter" class="sort-select js-actions-customer-filter">${customerOptions}</select>
+        </div>
+        <div class="action-toolbar-field">
+          <label class="sort-label" for="actions-partner-filter">Partner</label>
+          <select id="actions-partner-filter" class="sort-select js-actions-partner-filter">${partnerOptions}</select>
+        </div>
+        <div class="action-toolbar-field">
+          <label class="sort-label" for="actions-due-filter">Due date</label>
+          <select id="actions-due-filter" class="sort-select js-actions-due-filter">${dueDateOptions}</select>
+        </div>
+        <div class="action-toolbar-field">
+          <label class="sort-label" for="actions-sort-by">Sort by</label>
+          <select id="actions-sort-by" class="sort-select js-actions-sort-by">${sortByOptions}</select>
+        </div>
+        <button class="secondary-button js-actions-reset-filters action-toolbar-reset" type="button">Reset filters</button>
+      </div>
+      ${errorMessage}
+      <div class="action-list action-list--command-center">${listMarkup}</div>
+    </section>
+  `;
+}
+
+function isActionDueSoon(action) {
+  if (!action || !action.dueDate || isActionClosed(action)) {
+    return false;
+  }
+
+  const weekRange = getDueThisWeekRange();
+  return action.dueDate >= getTodayDateString() && action.dueDate <= weekRange.end;
+}
+
+function renderCompactActionRow(action) {
+  const ownerLabel = getActionOwnerLabel(action);
+  const customerLabel = getCleanActionCustomerLabel(action);
+  const partnerLabel = getCleanActionPartnerLabel(action);
+  const dueDateLabel = action.dueDate ? formatDate(action.dueDate) : 'No due date';
+  const dueStateLabel = isActionOverdue(action)
+    ? 'Overdue'
+    : isActionDueSoon(action)
+      ? 'Due soon'
+      : '';
+  const dueDateClass = isActionOverdue(action)
+    ? 'action-due-date action-due-date--overdue'
+    : isActionDueSoon(action)
+      ? 'action-due-date action-due-date--soon'
+      : 'action-due-date';
+  const statusClass = getActionStatusClass(action);
+  const statusLabel = getActionStatusLabel(action);
+  const statusOptions = ACTION_STATUSES.map((status) => `
+    <option value="${escapeHtml(status)}" ${status === action.status ? 'selected' : ''}>${escapeHtml(status)}</option>
+  `).join('');
+  const isExpanded = Boolean(state.actionsExpandedById[action.id]);
+  const expandedId = `action-compact-details-${hashTextStable(action.id)}`;
+  const rowClass = isActionOverdue(action)
+    ? 'action-compact-row action-compact-row--overdue'
+    : isActionDueSoon(action)
+      ? 'action-compact-row action-compact-row--soon'
+      : 'action-compact-row';
+  const ownershipCategory = getActionDisplayedResponsibility(action);
+  const expandCue = isExpanded ? 'Hide details' : 'Click to view details';
+  const openSourceMeetingButton = action.sourceMeetingId
+    ? `<button class="secondary-button secondary-button--compact js-open-meeting" type="button" data-meeting-id="${escapeHtml(action.sourceMeetingId)}" data-return-section="actions">Open source meeting</button>`
+    : '';
+
+  return `
+    <article class="${rowClass} action-compact-row--ownership-${escapeHtml(ownershipCategory)}" data-action-id="${escapeHtml(action.id)}">
+      <div class="action-compact-grid">
+        <div class="action-compact-primary">
+          <div class="action-compact-title-row">
+            ${renderActionOwnershipBadge(action)}
+            <button class="action-compact-primary-button js-action-compact-toggle" type="button" data-action-id="${escapeHtml(action.id)}" aria-expanded="${isExpanded ? 'true' : 'false'}" aria-controls="${escapeHtml(expandedId)}">
+              <span class="action-compact-button-content">
+              <span class="action-compact-title-wrap">
+                <span class="action-compact-title">${escapeHtml(action.description)}</span>
+                <span class="action-compact-cue">${escapeHtml(expandCue)}</span>
+              </span>
+                <span class="action-compact-button-meta">${escapeHtml(ownerLabel)} <span class="action-card-separator">·</span> ${escapeHtml(customerLabel)} <span class="action-card-separator">·</span> ${escapeHtml(partnerLabel)}</span>
+                <span class="entity-meta action-compact-source">Source: ${escapeHtml(action.sourceMeetingTitle || 'Unknown meeting')}</span>
+              </span>
+              <span class="action-compact-chevron" aria-hidden="true">${isExpanded ? '▾' : '▸'}</span>
+            </button>
+          </div>
+        </div>
+        <div class="action-compact-status-group">
+          <label class="sort-label compact-field-label" for="compact-action-status-${escapeHtml(action.id)}">Status</label>
+          <select id="compact-action-status-${escapeHtml(action.id)}" class="sort-select js-action-status" data-action-id="${escapeHtml(action.id)}">${statusOptions}</select>
+        </div>
+        <div class="action-compact-date-group">
+          <label class="sort-label compact-field-label" for="compact-action-due-${escapeHtml(action.id)}">Due date</label>
+          <input id="compact-action-due-${escapeHtml(action.id)}" class="sort-select js-action-due-date" data-action-id="${escapeHtml(action.id)}" type="date" value="${escapeHtml(action.dueDate || '')}">
         </div>
       </div>
-        ${errorMessage}
-      <div class="action-list">${list}</div>
-    </section>
+      <div id="${escapeHtml(expandedId)}" class="action-compact-expanded" ${isExpanded ? '' : 'hidden'}>
+        <p><strong>Notes:</strong> ${escapeHtml(action.notes || 'No notes')}</p>
+        <p><strong>Full source meeting:</strong> ${escapeHtml(action.sourceMeetingTitle || 'Unknown meeting')}</p>
+        <p><strong>Owner:</strong> ${escapeHtml(ownerLabel)}</p>
+          <p><strong>Customer:</strong> ${escapeHtml(customerLabel)}</p>
+          <p><strong>Partner:</strong> ${escapeHtml(partnerLabel)}</p>
+          <p><strong>Status:</strong> ${escapeHtml(statusLabel)}</p>
+          <p><strong>Due date:</strong> ${escapeHtml(dueDateLabel)}${dueStateLabel ? ` (${escapeHtml(dueStateLabel)})` : ''}</p>
+        <div class="action-compact-expanded-actions">
+          ${openSourceMeetingButton}
+        </div>
+      </div>
+    </article>
   `;
 }
 
@@ -6763,6 +7456,9 @@ function renderActionCard(action, options = {}) {
   const editable = Boolean(options.editable);
   const returnSection = options.returnSection ? String(options.returnSection) : '';
   const ownerLabel = action.owner || 'Unassigned';
+  const customerLabel = getCleanActionCustomerLabel(action);
+  const partnerLabel = getCleanActionPartnerLabel(action);
+  const ownershipCategory = getActionDisplayedResponsibility(action);
   const notesLabel = action.notes || 'No notes';
   const dueDateLabel = action.dueDate ? formatDate(action.dueDate) : 'No due date';
   const dueDateClass = isActionOverdue(action) ? 'action-due-date action-due-date--overdue' : 'action-due-date';
@@ -6774,8 +7470,11 @@ function renderActionCard(action, options = {}) {
   `).join('');
 
   return `
-    <article class="action-card${highlightedClass}" data-action-id="${escapeHtml(action.id)}">
-      <h4>${escapeHtml(action.description)}</h4>
+    <article class="action-card action-card--ownership-${escapeHtml(ownershipCategory)}${highlightedClass}" data-action-id="${escapeHtml(action.id)}">
+      <div class="action-card-heading-row">
+        ${renderActionOwnershipBadge(action)}
+        <h4>${escapeHtml(action.description)}</h4>
+      </div>
       <p class="action-card-note">${escapeHtml(notesLabel)}</p>
       <div class="action-meta action-card-row">
         <span>${escapeHtml(ownerLabel)}</span>
@@ -6784,7 +7483,7 @@ function renderActionCard(action, options = {}) {
         <span class="action-card-separator">·</span>
         <span class="${dueDateClass}">Due ${escapeHtml(dueDateLabel)}</span>
       </div>
-      <p class="entity-meta action-card-row">Customer: ${escapeHtml(action.customer || 'Unassigned')} <span class="action-card-separator">·</span> Partner: ${escapeHtml(action.partner || 'Unassigned')}</p>
+      <p class="entity-meta action-card-row">Customer: ${escapeHtml(customerLabel)} <span class="action-card-separator">·</span> Partner: ${escapeHtml(partnerLabel)}</p>
       <div class="action-meta action-card-row action-card-row--controls">
         <span>Source: ${escapeHtml(action.sourceMeetingTitle || 'Unknown meeting')}</span>
         ${action.sourceMeetingId ? `<button class="secondary-button action-card-source-button js-open-meeting" type="button" data-meeting-id="${escapeHtml(action.sourceMeetingId)}" ${returnSection ? `data-return-section="${escapeHtml(returnSection)}"` : ''}>Open source meeting</button>` : ''}
@@ -7593,6 +8292,101 @@ function attachInteractions() {
     });
   }
 
+  document.querySelectorAll('.js-actions-view-toggle').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const selectedView = button.dataset.actionView;
+      if (!ACTION_VIEW_OPTIONS.includes(selectedView) || selectedView === state.actionView) {
+        return;
+      }
+
+      const previousView = state.actionView;
+      button.disabled = true;
+      const saveResult = await updateSingleApplicationSetting('actionView', selectedView);
+      if (!saveResult.success) {
+        state.actionView = previousView;
+        window.alert(saveResult.error);
+      }
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-action-main-filter').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const selectedFilter = button.dataset.mainFilter;
+      if (!ACTION_FILTERS.includes(selectedFilter) || selectedFilter === state.actionFilter) {
+        return;
+      }
+
+      const previousFilter = state.actionFilter;
+      button.disabled = true;
+      const saveResult = await updateSingleApplicationSetting('actionFilter', selectedFilter);
+      if (!saveResult.success) {
+        state.actionFilter = previousFilter;
+        window.alert(saveResult.error);
+      }
+      renderViews();
+    });
+  });
+
+  const actionsCustomerFilter = document.querySelector('.js-actions-customer-filter');
+  if (actionsCustomerFilter) {
+    actionsCustomerFilter.addEventListener('change', (event) => {
+      state.actionsCustomerFilter = event.target.value || 'All customers';
+      renderViews();
+    });
+  }
+
+  const actionsPartnerFilter = document.querySelector('.js-actions-partner-filter');
+  if (actionsPartnerFilter) {
+    actionsPartnerFilter.addEventListener('change', (event) => {
+      state.actionsPartnerFilter = event.target.value || 'All partners';
+      renderViews();
+    });
+  }
+
+  const actionsDueFilter = document.querySelector('.js-actions-due-filter');
+  if (actionsDueFilter) {
+    actionsDueFilter.addEventListener('change', (event) => {
+      state.actionsDueDateFilter = event.target.value || 'Any due date';
+      renderViews();
+    });
+  }
+
+  const actionsSortBy = document.querySelector('.js-actions-sort-by');
+  if (actionsSortBy) {
+    actionsSortBy.addEventListener('change', (event) => {
+      state.actionsSortBy = GLOBAL_ACTION_SORT_OPTIONS.includes(event.target.value) ? event.target.value : 'Priority';
+      renderViews();
+    });
+  }
+
+  document.querySelectorAll('.js-actions-reset-filters').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.actionFilter = 'Active';
+      state.actionsCustomerFilter = 'All customers';
+      state.actionsPartnerFilter = 'All partners';
+      state.actionsDueDateFilter = 'Any due date';
+      state.actionsSortBy = 'Priority';
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-action-compact-toggle').forEach((button) => {
+    button.addEventListener('click', () => {
+      const actionId = button.dataset.actionId || '';
+      if (!actionId) {
+        return;
+      }
+
+      if (state.actionsExpandedById[actionId]) {
+        delete state.actionsExpandedById[actionId];
+      } else {
+        state.actionsExpandedById[actionId] = true;
+      }
+      renderViews();
+    });
+  });
+
   document.querySelectorAll('.js-action-status').forEach((field) => {
     field.addEventListener('change', async () => {
       const actionId = field.dataset.actionId;
@@ -7605,6 +8399,24 @@ function attachInteractions() {
       const nextValue = field.value;
       field.disabled = true;
       const saved = await updateActionOverride(actionId, { status: nextValue });
+      if (!saved) {
+        field.value = previousValue;
+      }
+      field.disabled = false;
+    });
+  });
+
+  document.querySelectorAll('.js-action-responsibility').forEach((field) => {
+    field.addEventListener('change', async () => {
+      const actionId = field.dataset.actionId;
+      if (!actionId) {
+        return;
+      }
+
+      const previousValue = normalizeActionResponsibilityValue(field.dataset.currentResponsibility || field.value) || 'unassigned';
+      const nextValue = normalizeActionResponsibilityValue(field.value) || 'unassigned';
+      field.disabled = true;
+      const saved = await updateActionOverride(actionId, { responsibility: nextValue });
       if (!saved) {
         field.value = previousValue;
       }
