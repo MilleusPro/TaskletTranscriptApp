@@ -898,6 +898,7 @@ function resetImportTransientState(options = {}) {
   state.importExtractedHtml = '';
   state.importExtractedSections = createEmptyExtractedSections();
   state.importReview = createEmptyImportReview();
+  state.importReview.sourceType = getActiveImportSourceType();
   state.importSaveInProgress = false;
   state.importSaveStatus = '';
   state.importRawTranscriptText = '';
@@ -2747,7 +2748,7 @@ const state = {
   overrideMigrationArchiveAvailable: false,
   migrationInProgress: false,
   migrationArchiveAvailable: false,
-  importMode: IMPORT_MODES.CLEANED_DOCX,
+  importMode: IMPORT_MODES.RAW_TEAMS_AI,
   importSelectedFile: null,
   importError: '',
   importSuccessMessage: '',
@@ -6093,10 +6094,10 @@ function renderImport() {
   const saveStatusMessage = state.importSaveInProgress && state.importSaveStatus
     ? `<p class="import-hint" role="status">${escapeHtml(state.importSaveStatus)}</p>`
     : '';
-  const uploadHeading = rawMode ? 'Upload a raw Microsoft Teams transcript' : 'Upload a cleaned meeting transcript';
+  const uploadHeading = rawMode ? 'Upload a Microsoft Teams transcript' : 'Upload an AI-cleaned transcript';
   const uploadDescription = rawMode
-    ? 'Select a raw English Microsoft Teams DOCX transcript. The app extracts plain text locally, then sends only that text through the authenticated AI cleanup function after you explicitly start cleanup.'
-    : 'Select a cleaned DOCX file to start the review step. The app extracts the text in the browser and pre-fills the review fields.';
+    ? 'Select the original English Teams DOCX file. The transcript is extracted locally, then sent securely for AI cleanup after you start the process.'
+    : 'Select a cleaned and structured DOCX transcript that is ready for review and import.';
   const fileSummary = selectedFile
     ? `
       <div class="import-file-summary" role="status">
@@ -6109,7 +6110,7 @@ function renderImport() {
         </div>
       </div>
     `
-    : `<p class="import-hint">Choose a ${rawMode ? 'raw Microsoft Teams' : 'cleaned Tasklet'} DOCX transcript to begin the review workflow.</p>`;
+    : `<p class="import-hint">Choose a ${rawMode ? 'Microsoft Teams Transcript' : 'AI-Cleaned Transcript'} DOCX file to begin the review workflow.</p>`;
 
   const extractionStatus = state.importExtracting
     ? `<p class="import-hint">${rawMode ? 'Reading Teams transcript…' : 'Extracting document content…'}</p>`
@@ -6180,7 +6181,7 @@ function renderImport() {
         <h4>${rawMode ? 'Review readiness' : 'Detected sections'}</h4>
       </div>
       <ul class="import-detected-list">${rawMode ? `
-        <li class="import-detected-section ${state.importRawTranscriptText ? 'found' : 'missing'}"><span>Raw transcript extracted locally</span><strong>${state.importRawTranscriptText ? 'Ready' : 'Missing'}</strong></li>
+        <li class="import-detected-section ${state.importRawTranscriptText ? 'found' : 'missing'}"><span>Microsoft Teams transcript extracted locally</span><strong>${state.importRawTranscriptText ? 'Ready' : 'Missing'}</strong></li>
         <li class="import-detected-section ${state.importReview.cleanedTranscript ? 'found' : 'missing'}"><span>AI-cleaned transcript available</span><strong>${state.importReview.cleanedTranscript ? 'Ready' : 'Pending'}</strong></li>
         <li class="import-detected-section ${canRunAiCleanup() ? 'found' : 'missing'}"><span>Ready for AI cleanup</span><strong>${canRunAiCleanup() ? 'Yes' : 'Not yet'}</strong></li>
       ` : detectedSections}</ul>
@@ -6245,7 +6246,7 @@ function renderImport() {
         <div class="section-heading">
           <h4>Transcript previews</h4>
         </div>
-        ${renderTranscriptPreviewDetails('Raw Teams transcript', state.importRawTranscriptText, 'raw-transcript-preview')}
+        ${renderTranscriptPreviewDetails('Microsoft Teams transcript', state.importRawTranscriptText, 'raw-transcript-preview')}
         ${renderTranscriptPreviewDetails('AI-cleaned transcript', state.importReview.cleanedTranscript, 'cleaned-transcript-preview')}
       </div>
     `
@@ -6332,14 +6333,24 @@ function renderImport() {
           <h3>${uploadHeading}</h3>
         </div>
       </div>
+      <div class="import-mode-intro">
+        <h4>What type of transcript are you importing?</h4>
+        <p class="entity-meta">Choose the option that matches your file before uploading.</p>
+      </div>
       <div class="import-mode-selector" role="radiogroup" aria-label="Import mode">
-        <button class="import-mode-card js-import-mode-toggle ${rawMode ? '' : 'active'}" type="button" data-import-mode="${IMPORT_MODES.CLEANED_DOCX}" aria-pressed="${rawMode ? 'false' : 'true'}">
-          <strong>Cleaned Tasklet Transcript</strong>
-          <span>Default mode for already-cleaned DOCX transcripts.</span>
-        </button>
         <button class="import-mode-card js-import-mode-toggle ${rawMode ? 'active' : ''}" type="button" data-import-mode="${IMPORT_MODES.RAW_TEAMS_AI}" aria-pressed="${rawMode ? 'true' : 'false'}">
-          <strong>Raw Microsoft Teams Transcript</strong>
-          <span>English transcripts only. Local text extraction, then authenticated AI cleanup.</span>
+          <span class="import-mode-card-header">
+            <strong>Microsoft Teams Transcript</strong>
+            ${rawMode ? '<span class="import-mode-selected-badge">Selected</span>' : ''}
+          </span>
+          <span>Upload the original English Microsoft Teams transcript. The app will use AI to clean, structure, and prepare it for review.</span>
+        </button>
+        <button class="import-mode-card js-import-mode-toggle ${rawMode ? '' : 'active'}" type="button" data-import-mode="${IMPORT_MODES.CLEANED_DOCX}" aria-pressed="${rawMode ? 'false' : 'true'}">
+          <span class="import-mode-card-header">
+            <strong>AI-Cleaned Transcript</strong>
+            ${rawMode ? '' : '<span class="import-mode-selected-badge">Selected</span>'}
+          </span>
+          <span>Upload a transcript that has already been cleaned and structured for the Transcript Hub.</span>
         </button>
       </div>
 
@@ -6355,7 +6366,7 @@ function renderImport() {
       <div class="import-notes">
         <p class="entity-meta">Supported format: .docx only</p>
         <p class="entity-meta">Maximum file size: 10 MB</p>
-        ${rawMode ? '<p class="entity-meta">Raw Teams cleanup currently supports English transcripts only.</p>' : ''}
+        ${rawMode ? '<p class="entity-meta">Microsoft Teams cleanup currently supports English transcripts only.</p>' : ''}
       </div>
 
       ${errorMessage}
