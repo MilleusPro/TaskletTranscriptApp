@@ -13,6 +13,10 @@ const DOCX_MIME_TYPES = [
   'application/octet-stream',
   'application/zip'
 ];
+const IMPORT_MODES = {
+  CLEANED_DOCX: 'cleaned-docx',
+  RAW_TEAMS_AI: 'raw-teams-ai'
+};
 const STORAGE_KEY = 'taskletTranscriptApp.meetings';
 const ACTION_OVERRIDES_STORAGE_KEY = 'taskletTranscriptApp.actionOverrides';
 const SETTINGS_STORAGE_KEY = 'taskletTranscriptApp.settings';
@@ -61,6 +65,7 @@ const MEETING_ROW_COLUMNS = [
   'extracted_text',
   'extracted_html',
   'extra_sections',
+  'source_type',
   'storage_bucket',
   'storage_path',
   'original_file_name',
@@ -825,7 +830,16 @@ function createEmptyImportReview() {
     customer: '',
     partner: '',
     participants: '',
-    subject: ''
+    subject: '',
+    summary: '',
+    decisions: '',
+    actions: '',
+    openQuestions: '',
+    commercialNotes: '',
+    cleanedTranscript: '',
+    sourceType: IMPORT_MODES.CLEANED_DOCX,
+    extraSections: [],
+    uncertainties: []
   };
 }
 
@@ -847,6 +861,55 @@ function createEmptyImportParserDebug() {
     metadata: {},
     headings: []
   };
+}
+
+function createEmptyTeamsStructureDetection() {
+  return {
+    recognized: false,
+    warning: '',
+    indicators: [],
+    score: 0,
+    requiresConfirmation: false
+  };
+}
+
+function createEmptyAiCleanupState() {
+  return {
+    inProgress: false,
+    canCancel: false,
+    requestSent: false,
+    failed: false,
+    error: '',
+    statusMessage: '',
+    stage: 'idle',
+    warning: '',
+    internalStatusCode: null,
+    timerId: 0
+  };
+}
+
+function resetImportTransientState(options = {}) {
+  const preserveSuccessMessage = Boolean(options.preserveSuccessMessage);
+
+  state.importError = '';
+  state.importExtractionError = '';
+  state.importExtracting = false;
+  state.importExtractedText = '';
+  state.importExtractedHtml = '';
+  state.importExtractedSections = createEmptyExtractedSections();
+  state.importReview = createEmptyImportReview();
+  state.importSaveInProgress = false;
+  state.importSaveStatus = '';
+  state.importRawTranscriptText = '';
+  state.importWarnings = [];
+  state.importTeamsDetection = createEmptyTeamsStructureDetection();
+  state.importTeamsConfirmation = false;
+  state.importAiCleanup = createEmptyAiCleanupState();
+  resetImportParserDebugState();
+
+  if (!preserveSuccessMessage) {
+    state.importSuccessMessage = '';
+  }
 }
 
 function resetImportParserDebugState() {
@@ -1480,6 +1543,573 @@ async function extractDocumentContent(file) {
   };
 }
 
+async function extractDocumentRawText(file) {
+  if (typeof window === 'undefined' || !window.mammoth) {
+    throw new Error('Mammoth.js could not be loaded.');
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+  const textResult = await window.mammoth.extractRawText({ arrayBuffer });
+  return textResult && typeof textResult.value === 'string' ? textResult.value : '';
+}
+
+function isRawTeamsImportMode() {
+  return state.importMode === IMPORT_MODES.RAW_TEAMS_AI;
+}
+
+function getActiveImportSourceType() {
+  return isRawTeamsImportMode() ? IMPORT_MODES.RAW_TEAMS_AI : IMPORT_MODES.CLEANED_DOCX;
+}
+
+function clearImportAiCleanupTimer() {
+  const timerId = Number(state.importAiCleanup && state.importAiCleanup.timerId);
+  if (timerId && typeof window !== 'undefined') {
+    window.clearTimeout(timerId);
+  }
+
+  if (state.importAiCleanup) {
+    state.importAiCleanup.timerId = 0;
+  }
+}
+
+function sanitizePlainText(value, maxLength = 4000) {
+  const rawText = typeof value === 'string' ? value : String(value || '');
+  const withoutControlChars = rawText.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
+  const normalizedLines = withoutControlChars
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  if (!maxLength || normalizedLines.length <= maxLength) {
+    return normalizedLines;
+  }
+
+  return normalizedLines.slice(0, maxLength).trim();
+}
+
+function sanitizePlainTextArray(value, maxItems = 200, maxItemLength = 2000) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .slice(0, maxItems)
+    .map((entry) => sanitizePlainText(entry, maxItemLength))
+    .filter(Boolean);
+}
+
+function sanitizeReviewExtraSections(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((section) => {
+      if (!section || typeof section !== 'object') {
+        return null;
+      }
+
+      const heading = sanitizePlainText(section.heading, 160);
+      const lines = Array.isArray(section.lines)
+        ? sanitizePlainTextArray(section.lines, 200, 2000)
+        : sanitizePlainTextArray(String(section.lines || '').split(/\r?\n/), 200, 2000);
+
+      if (!heading && !lines.length) {
+        return null;
+      }
+
+      return {
+        heading: heading || 'Additional Section',
+        lines
+      };
+    })
+    .filter(Boolean);
+}
+
+function convertReviewTextToLines(value) {
+  return sanitizePlainText(String(value || ''), 100000)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function syncImportReviewContentFromSections(sections, sourceType = getActiveImportSourceType()) {
+  const normalizedSections = sections || createEmptyExtractedSections();
+  state.importReview.summary = normalizeStringArray(normalizedSections.summary).join('\n');
+  state.importReview.decisions = normalizeStringArray(normalizedSections.decisions).join('\n');
+  state.importReview.actions = normalizeStringArray(normalizedSections.actions).join('\n');
+  state.importReview.openQuestions = normalizeStringArray(normalizedSections.openQuestions).join('\n');
+  state.importReview.commercialNotes = normalizeStringArray(normalizedSections.commercialNotes).join('\n');
+  state.importReview.cleanedTranscript = sanitizePlainText(normalizedSections.cleanedTranscript || '', 300000);
+  state.importReview.extraSections = sanitizeReviewExtraSections(normalizedSections.extraSections);
+  state.importReview.sourceType = sourceType;
+}
+
+function validateExtractedRawTranscriptText(text) {
+  const originalText = sanitizePlainText(text, 0);
+
+  if (!originalText) {
+    return {
+      valid: false,
+      error: 'No text could be extracted from this DOCX file.'
+    };
+  }
+
+  if (originalText.length < 100) {
+    return {
+      valid: false,
+      error: 'The extracted transcript is too short. Please choose a full English Microsoft Teams transcript.'
+    };
+  }
+
+  if (originalText.length > 300000) {
+    return {
+      valid: false,
+      error: 'The extracted transcript is too long for AI cleanup. Please shorten the transcript and try again.'
+    };
+  }
+
+  return {
+    valid: true,
+    text: originalText
+  };
+}
+
+function detectLikelyTeamsTranscriptStructure(rawTranscriptText) {
+  const text = String(rawTranscriptText || '');
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const openingLines = lines.slice(0, 40);
+  const openingText = openingLines.join('\n');
+  const speakerTimestampMatches = lines.filter((line) => /\b\d{1,2}:\d{2}(?::\d{2})?\s?(?:AM|PM)?\b/i.test(line) && /^[A-Z][\w'.-]+(?:\s+[A-Z][\w'.-]+){0,5}[,:-]?\s+\d{1,2}:\d{2}/.test(line));
+  const indicators = [
+    {
+      key: 'meetingTitleNearBeginning',
+      label: 'Meeting title near the beginning',
+      matched: Boolean(openingLines[0] && openingLines[0].length > 4 && !/started transcription|stopped transcription/i.test(openingLines[0]))
+    },
+    {
+      key: 'dateTimeNearBeginning',
+      label: 'Date or time near the beginning',
+      matched: /(\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b|\b\d{1,2}:\d{2}\s?(?:AM|PM)?\b)/i.test(openingText)
+    },
+    {
+      key: 'durationNearBeginning',
+      label: 'Duration near the beginning',
+      matched: /\bduration\b|\b\d+\s*(?:minutes?|hours?|hrs?)\b/i.test(openingText)
+    },
+    {
+      key: 'startedTranscription',
+      label: '"started transcription" marker',
+      matched: /started transcription/i.test(text)
+    },
+    {
+      key: 'stoppedTranscription',
+      label: '"stopped transcription" marker',
+      matched: /stopped transcription/i.test(text)
+    },
+    {
+      key: 'speakerLabelsWithTimestamps',
+      label: 'Repeated speaker labels with timestamps',
+      matched: speakerTimestampMatches.length >= 2
+    }
+  ];
+
+  const score = indicators.filter((indicator) => indicator.matched).length;
+  const recognized = score >= 3 || ((/started transcription/i.test(text) || /stopped transcription/i.test(text)) && speakerTimestampMatches.length >= 2);
+  const requiresConfirmation = !recognized && !isCurrentUserAdmin();
+  const warning = recognized
+    ? ''
+    : 'The file does not clearly match the expected English Microsoft Teams transcript structure. Review the file carefully before running AI cleanup.';
+
+  return {
+    recognized,
+    warning,
+    indicators,
+    score,
+    requiresConfirmation
+  };
+}
+
+function sanitizeAiParticipantRecord(record) {
+  if (!record || typeof record !== 'object') {
+    return null;
+  }
+
+  const name = sanitizePlainText(record.name || record.fullName || '', 160);
+  const company = sanitizePlainText(record.company || '', 160);
+  const role = sanitizePlainText(record.role || '', 160);
+  const email = sanitizePlainText(record.email || '', 200);
+  const originalLabel = sanitizePlainText(record.originalLabel || '', 240);
+
+  if (!name && !originalLabel) {
+    return null;
+  }
+
+  return {
+    name,
+    company,
+    role,
+    email,
+    originalLabel
+  };
+}
+
+function sanitizeAiActionRecord(record) {
+  if (!record || typeof record !== 'object') {
+    return null;
+  }
+
+  const description = sanitizePlainText(record.description || record.action || record.task || '', 400);
+  if (!description) {
+    return null;
+  }
+
+  return {
+    owner: sanitizePlainText(record.owner || record.assignee || '', 160),
+    description,
+    notes: sanitizePlainText(record.notes || '', 500),
+    dueDate: normalizeExtractedDate(record.dueDate || record.due_date || ''),
+    status: sanitizePlainText(record.status || '', 80)
+  };
+}
+
+function participantRecordToDisplayLabel(record) {
+  if (!record) {
+    return '';
+  }
+
+  if (record.originalLabel) {
+    return record.originalLabel;
+  }
+
+  if (record.name && record.company) {
+    return `${record.name} / ${record.company}`;
+  }
+
+  return record.name || '';
+}
+
+function convertAiActionsToReviewLines(actions) {
+  return actions
+    .map((action) => {
+      const notes = [];
+      if (action.notes) {
+        notes.push(action.notes);
+      }
+      if (action.dueDate) {
+        notes.push(`Due: ${action.dueDate}`);
+      }
+      if (action.status) {
+        notes.push(`Status: ${action.status}`);
+      }
+
+      return [action.owner || 'Unassigned', action.description, notes.join('; ')].filter((part, index) => index < 2 || part).join(' | ');
+    })
+    .filter(Boolean);
+}
+
+function sanitizeAiCleanupResult(responsePayload) {
+  if (!isPlainObject(responsePayload) || responsePayload.success !== true || !isPlainObject(responsePayload.result)) {
+    return {
+      valid: false,
+      error: 'The AI cleanup result was invalid.'
+    };
+  }
+
+  const result = responsePayload.result;
+  const participants = Array.isArray(result.participants)
+    ? result.participants.map(sanitizeAiParticipantRecord).filter(Boolean)
+    : [];
+  const actions = Array.isArray(result.actions)
+    ? result.actions.map(sanitizeAiActionRecord).filter(Boolean)
+    : [];
+  const extraSections = Array.isArray(result.extraSections)
+    ? result.extraSections.map((section) => {
+      if (!section || typeof section !== 'object') {
+        return null;
+      }
+
+      const heading = sanitizePlainText(section.heading || section.title || '', 160);
+      const lines = sanitizePlainTextArray(section.lines || section.items || [], 200, 2000);
+      if (!heading && !lines.length) {
+        return null;
+      }
+
+      return {
+        heading: heading || 'Additional Section',
+        lines
+      };
+    }).filter(Boolean)
+    : [];
+
+  const sanitized = {
+    meetingTitle: sanitizePlainText(result.meetingTitle || '', 200),
+    date: normalizeExtractedDate(result.date || ''),
+    startTime: sanitizePlainText(result.startTime || '', 80),
+    duration: sanitizePlainText(result.duration || '', 120),
+    customer: sanitizePlainText(result.customer || '', 160),
+    partner: sanitizePlainText(result.partner || '', 160),
+    subject: sanitizePlainText(result.subject || '', 2000),
+    participants,
+    summary: sanitizePlainTextArray(result.summary, 100, 2000),
+    decisions: sanitizePlainTextArray(result.decisions, 100, 2000),
+    actions,
+    openQuestions: sanitizePlainTextArray(result.openQuestions, 100, 2000),
+    commercialNotes: sanitizePlainTextArray(result.commercialNotes, 100, 2000),
+    cleanedTranscript: sanitizePlainText(result.cleanedTranscript || '', 300000),
+    extraSections,
+    uncertainties: sanitizePlainTextArray(result.uncertainties, 100, 1000)
+  };
+
+  const usableFieldCount = [
+    sanitized.meetingTitle,
+    sanitized.date,
+    sanitized.startTime,
+    sanitized.duration,
+    sanitized.customer,
+    sanitized.partner,
+    sanitized.subject,
+    sanitized.cleanedTranscript,
+    sanitized.summary.length,
+    sanitized.decisions.length,
+    sanitized.actions.length,
+    sanitized.openQuestions.length,
+    sanitized.commercialNotes.length,
+    sanitized.extraSections.length
+  ].filter(Boolean).length;
+
+  if (!usableFieldCount) {
+    return {
+      valid: false,
+      error: 'The AI cleanup result did not contain usable meeting data.'
+    };
+  }
+
+  const warningParts = [];
+  if (!sanitized.cleanedTranscript) {
+    warningParts.push('The cleaned transcript was missing and needs review.');
+  }
+  if (!sanitized.meetingTitle || !sanitized.date) {
+    warningParts.push('Some meeting metadata was missing and needs review.');
+  }
+
+  return {
+    valid: true,
+    incomplete: warningParts.length > 0,
+    warning: warningParts.join(' '),
+    data: sanitized
+  };
+}
+
+function applyAiCleanupResultToImportReview(sanitizedResult) {
+  const aiData = sanitizedResult.data;
+  const extractedSections = {
+    summary: [...aiData.summary],
+    decisions: [...aiData.decisions],
+    actions: convertAiActionsToReviewLines(aiData.actions),
+    openQuestions: [...aiData.openQuestions],
+    commercialNotes: [...aiData.commercialNotes],
+    cleanedTranscript: aiData.cleanedTranscript,
+    extraSections: aiData.extraSections.map((section) => ({
+      heading: section.heading,
+      lines: [...section.lines]
+    }))
+  };
+
+  state.importExtractedSections = extractedSections;
+  state.importReview = {
+    ...createEmptyImportReview(),
+    meetingTitle: aiData.meetingTitle,
+    date: aiData.date,
+    dateText: aiData.date,
+    startTime: aiData.startTime,
+    duration: aiData.duration,
+    customer: aiData.customer,
+    partner: aiData.partner,
+    participants: aiData.participants.map(participantRecordToDisplayLabel).filter(Boolean).join(', '),
+    subject: aiData.subject,
+    summary: extractedSections.summary.join('\n'),
+    decisions: extractedSections.decisions.join('\n'),
+    actions: extractedSections.actions.join('\n'),
+    openQuestions: extractedSections.openQuestions.join('\n'),
+    commercialNotes: extractedSections.commercialNotes.join('\n'),
+    cleanedTranscript: extractedSections.cleanedTranscript,
+    sourceType: IMPORT_MODES.RAW_TEAMS_AI,
+    extraSections: sanitizeReviewExtraSections(extractedSections.extraSections),
+    uncertainties: [...aiData.uncertainties]
+  };
+}
+
+function getAiCleanupGenericErrorMessage() {
+  return 'AI cleanup failed. Please try again after reviewing that the file is an English Microsoft Teams transcript.';
+}
+
+function updateImportParserDebugForTeamsDetection(detection) {
+  if (!canExposeParserDebug()) {
+    return;
+  }
+
+  state.importParserDebug.metadata = {
+    ...state.importParserDebug.metadata,
+    importMode: state.importMode,
+    teamsStructureRecognized: detection.recognized ? 'yes' : 'no',
+    teamsStructureScore: String(detection.score)
+  };
+}
+
+async function invokeTeamsCleanupEdgeFunction() {
+  const rawTranscript = String(state.importRawTranscriptText || '').trim();
+  const selectedFile = state.importSelectedFile;
+
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.importAiCleanup = {
+      ...createEmptyAiCleanupState(),
+      failed: true,
+      error: 'You must be signed in to run AI cleanup.'
+    };
+    renderViews();
+    return;
+  }
+
+  state.importAiCleanup = {
+    ...state.importAiCleanup,
+    canCancel: false,
+    requestSent: true,
+    stage: 'sending',
+    statusMessage: 'Sending transcript securely'
+  };
+  renderViews();
+
+  state.importAiCleanup = {
+    ...state.importAiCleanup,
+    stage: 'cleaning',
+    statusMessage: 'Cleaning dialogue and removing filler'
+  };
+  renderViews();
+
+  const { data, error } = await supabaseClient.functions.invoke('cleanup-teams-transcript', {
+    body: {
+      rawTranscript,
+      fileName: selectedFile ? String(selectedFile.name || '').trim() : ''
+    }
+  });
+
+  if (error || !data) {
+    const statusCode = Number(error && (error.status || (error.context && error.context.status))) || null;
+    state.importAiCleanup = {
+      ...createEmptyAiCleanupState(),
+      failed: true,
+      error: getAiCleanupGenericErrorMessage(),
+      internalStatusCode: statusCode
+    };
+    renderViews();
+    return;
+  }
+
+  state.importAiCleanup = {
+    ...state.importAiCleanup,
+    stage: 'preparing',
+    statusMessage: 'Preparing review'
+  };
+
+  const sanitizedResult = sanitizeAiCleanupResult(data);
+  if (!sanitizedResult.valid) {
+    state.importAiCleanup = {
+      ...createEmptyAiCleanupState(),
+      failed: true,
+      error: sanitizedResult.error
+    };
+    renderViews();
+    return;
+  }
+
+  applyAiCleanupResultToImportReview(sanitizedResult);
+  state.importWarnings = sanitizedResult.warning ? [sanitizedResult.warning] : [];
+  state.importAiCleanup = {
+    ...createEmptyAiCleanupState(),
+    stage: 'complete',
+    statusMessage: 'AI cleanup completed',
+    warning: sanitizedResult.warning || ''
+  };
+  renderViews();
+}
+
+function handleCancelAiCleanup() {
+  if (!state.importAiCleanup.inProgress || state.importAiCleanup.requestSent) {
+    return;
+  }
+
+  clearImportAiCleanupTimer();
+  state.importAiCleanup = createEmptyAiCleanupState();
+  renderViews();
+}
+
+function canRunAiCleanup() {
+  if (!isRawTeamsImportMode() || state.importExtracting || state.importAiCleanup.inProgress) {
+    return false;
+  }
+
+  const fileValidation = getValidatedImportDocxFile(state.importSelectedFile);
+  const textValidation = validateExtractedRawTranscriptText(state.importRawTranscriptText);
+
+  if (!fileValidation.valid || !textValidation.valid) {
+    return false;
+  }
+
+  if (state.importTeamsDetection.requiresConfirmation && !state.importTeamsConfirmation) {
+    return false;
+  }
+
+  return true;
+}
+
+function handleStartAiCleanup() {
+  if (!canRunAiCleanup()) {
+    return;
+  }
+
+  state.importError = '';
+  state.importWarnings = [];
+  clearImportAiCleanupTimer();
+  state.importAiCleanup = {
+    ...createEmptyAiCleanupState(),
+    inProgress: true,
+    canCancel: true,
+    stage: 'reading',
+    statusMessage: 'Reading Teams transcript'
+  };
+  renderViews();
+
+  if (typeof window === 'undefined') {
+    invokeTeamsCleanupEdgeFunction();
+    return;
+  }
+
+  const timerId = window.setTimeout(() => {
+    invokeTeamsCleanupEdgeFunction();
+  }, 250);
+
+  state.importAiCleanup.timerId = timerId;
+}
+
+function setImportMode(nextMode) {
+  if (!Object.values(IMPORT_MODES).includes(nextMode) || state.importMode === nextMode) {
+    return;
+  }
+
+  clearImportAiCleanupTimer();
+  state.importMode = nextMode;
+  state.importSelectedFile = null;
+  resetImportTransientState();
+  renderViews();
+}
+
 function readStoredMeetings() {
   if (typeof window === 'undefined' || !window.localStorage) {
     return [];
@@ -1606,6 +2236,9 @@ function normalizeMeetingRecord(meeting) {
   normalizedMeeting.storagePath = String(meeting.storagePath || '').trim();
   normalizedMeeting.originalFileName = String(meeting.originalFileName || '').trim();
   normalizedMeeting.originalFileMimeType = String(meeting.originalFileMimeType || '').trim();
+  normalizedMeeting.sourceType = Object.values(IMPORT_MODES).includes(String(meeting.sourceType || '').trim())
+    ? String(meeting.sourceType || '').trim()
+    : '';
 
   const numericFileSize = Number(meeting.originalFileSize);
   normalizedMeeting.originalFileSize = Number.isFinite(numericFileSize) && numericFileSize >= 0
@@ -1767,6 +2400,7 @@ function mapMeetingToDatabaseRow(meeting, authenticatedUserId) {
         lines: normalizeStringArray(section.lines)
       }))
       : [],
+    source_type: normalizedMeeting.sourceType || null,
     storage_bucket: storageBucket || null,
     storage_path: storagePath || null,
     original_file_name: String(normalizedMeeting.originalFileName || '').trim(),
@@ -1815,6 +2449,9 @@ function mapDatabaseRowToMeeting(row) {
     extraSections: Array.isArray(row.extra_sections)
       ? row.extra_sections.map(normalizeExtraSection).filter(Boolean)
       : [],
+    sourceType: Object.values(IMPORT_MODES).includes(String(row.source_type || '').trim())
+      ? String(row.source_type || '').trim()
+      : '',
     storageBucket,
     storagePath,
     originalFileName: String(row.original_file_name || '').trim(),
@@ -2050,11 +2687,21 @@ function canSaveMeeting() {
   const title = getImportReviewFieldValue('meetingTitle').trim();
   const dateValue = getImportReviewFieldValue('date').trim();
   const selectedFile = state.importSelectedFile;
-  const hasExtractedContent = Boolean(state.importExtractedText.trim() || state.importExtractedHtml.trim());
+  const hasExtractedContent = isRawTeamsImportMode()
+    ? Boolean(String(state.importRawTranscriptText || '').trim() && String(state.importReview.cleanedTranscript || '').trim())
+    : Boolean(state.importExtractedText.trim() || state.importExtractedHtml.trim());
   const validation = getValidatedImportDocxFile(selectedFile);
   const isValidDocx = validation.valid;
   const isValidDate = /^\d{4}-\d{2}-\d{2}$/.test(dateValue) && normalizeExtractedDate(dateValue) === dateValue;
-  return Boolean(title && isValidDate && isValidDocx && !state.importExtracting && !state.importExtractionError && hasExtractedContent);
+  return Boolean(
+    title
+    && isValidDate
+    && isValidDocx
+    && !state.importExtracting
+    && !state.importExtractionError
+    && !state.importAiCleanup.inProgress
+    && hasExtractedContent
+  );
 }
 
 function updateImportSaveButtonState() {
@@ -2100,6 +2747,7 @@ const state = {
   overrideMigrationArchiveAvailable: false,
   migrationInProgress: false,
   migrationArchiveAvailable: false,
+  importMode: IMPORT_MODES.CLEANED_DOCX,
   importSelectedFile: null,
   importError: '',
   importSuccessMessage: '',
@@ -2112,6 +2760,11 @@ const state = {
   importExtractedHtml: '',
   importExtractedSections: createEmptyExtractedSections(),
   importParserDebug: createEmptyImportParserDebug(),
+  importRawTranscriptText: '',
+  importWarnings: [],
+  importTeamsDetection: createEmptyTeamsStructureDetection(),
+  importTeamsConfirmation: false,
+  importAiCleanup: createEmptyAiCleanupState(),
   dataManagementError: '',
   dataManagementSuccess: '',
   dataManagementLastExportAt: '',
@@ -4403,12 +5056,18 @@ function populateViewerContent(meeting) {
       const fileName = meeting.originalFileName ? meeting.originalFileName : 'No file name captured yet.';
       const hasStoredDocument = Boolean(String(meeting.storagePath || '').trim());
       const isDownloading = state.meetingDocumentDownloadInProgressId === meeting.id;
+      const sourceLabel = meeting.sourceType === IMPORT_MODES.RAW_TEAMS_AI
+        ? 'Raw Microsoft Teams transcript, cleaned with AI'
+        : '';
       const content = document.createElement('div');
       appendDetailLine(content, 'Subject', meeting.subject || 'No subject captured yet.');
       appendDetailLine(content, 'Customer', customer);
       appendDetailLine(content, 'Partner', partner);
       appendDetailLine(content, 'Participants', getMeetingDisplayParticipants(meeting));
       appendDetailLine(content, 'Date', meeting.date ? formatDate(meeting.date) : 'Date not available');
+      if (sourceLabel) {
+        appendDetailLine(content, 'Source', sourceLabel);
+      }
       appendDetailLine(content, 'Original file', fileName);
       appendDetailLine(content, 'Tags', tags);
 
@@ -5276,34 +5935,189 @@ function renderDataManagement() {
   `;
 }
 
+function renderImportWarnings() {
+  if (!Array.isArray(state.importWarnings) || !state.importWarnings.length) {
+    return '';
+  }
+
+  return state.importWarnings
+    .map((warning) => `<p class="import-warning" role="status">${escapeHtml(warning)}</p>`)
+    .join('');
+}
+
+function renderImportExtraSectionEditors() {
+  const sections = Array.isArray(state.importReview.extraSections) ? state.importReview.extraSections : [];
+  if (!sections.length) {
+    return '';
+  }
+
+  return `
+    <div class="import-extra-sections-editor">
+      ${sections.map((section, index) => `
+        <div class="import-preview-panel">
+          <label class="import-field-group import-field-group--full">
+            <span>Additional section heading</span>
+            <input class="import-field js-import-extra-section-heading" type="text" data-extra-section-index="${index}" value="${escapeHtml(section.heading || '')}">
+          </label>
+          <label class="import-field-group import-field-group--full">
+            <span>Additional section content</span>
+            <textarea class="import-field import-field--textarea js-import-extra-section-lines" data-extra-section-index="${index}">${escapeHtml((Array.isArray(section.lines) ? section.lines : []).join('\n'))}</textarea>
+          </label>
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderImportAiCleanupProgress() {
+  const cleanupState = state.importAiCleanup;
+  if (!cleanupState.inProgress && !cleanupState.failed && cleanupState.stage !== 'complete') {
+    return '';
+  }
+
+  const stageOrder = ['reading', 'sending', 'cleaning', 'detecting', 'preparing', 'complete'];
+  const currentIndex = stageOrder.indexOf(cleanupState.stage);
+  const effectiveIndex = currentIndex < 0 ? 0 : currentIndex;
+  const stages = [
+    { key: 'reading', label: 'Reading Teams transcript' },
+    { key: 'sending', label: 'Sending transcript securely' },
+    { key: 'cleaning', label: 'Cleaning dialogue and removing filler' },
+    { key: 'detecting', label: 'Detecting summary, decisions, actions, and open questions' },
+    { key: 'preparing', label: 'Preparing review' }
+  ];
+
+  const items = stages.map((stage, index) => {
+    let statusClass = 'pending';
+    let statusLabel = 'Pending';
+
+    if (cleanupState.failed) {
+      if (index < effectiveIndex) {
+        statusClass = 'done';
+        statusLabel = 'Done';
+      } else if (index === effectiveIndex) {
+        statusClass = 'active';
+        statusLabel = 'Stopped';
+      }
+    } else if (cleanupState.stage === 'complete') {
+      statusClass = 'done';
+      statusLabel = 'Done';
+    } else if (index < effectiveIndex) {
+      statusClass = 'done';
+      statusLabel = 'Done';
+    } else if (index === effectiveIndex) {
+      statusClass = 'active';
+      statusLabel = cleanupState.requestSent && stage.key === 'cleaning' ? 'In progress on server' : 'In progress';
+    }
+
+    return `<li class="import-progress-item ${statusClass}"><span>${escapeHtml(stage.label)}</span><strong>${escapeHtml(statusLabel)}</strong></li>`;
+  }).join('');
+
+  const actionButton = cleanupState.canCancel
+    ? '<button class="secondary-button js-cancel-ai-cleanup" type="button">Cancel cleanup</button>'
+    : '';
+  const retryButton = cleanupState.failed
+    ? '<button class="secondary-button js-retry-ai-cleanup" type="button">Retry cleanup</button>'
+    : '';
+  const statusMessage = cleanupState.statusMessage || (cleanupState.failed ? cleanupState.error : 'AI cleanup in progress');
+
+  return `
+    <div class="import-preview-panel">
+      <div class="section-heading">
+        <h4>AI cleanup progress</h4>
+      </div>
+      <p class="entity-meta">Processing may take some time for long transcripts.</p>
+      <ul class="import-progress-list">${items}</ul>
+      <p class="import-hint" role="status">${escapeHtml(statusMessage)}</p>
+      ${cleanupState.failed ? `<p class="import-error" role="alert">${escapeHtml(cleanupState.error)}</p>` : ''}
+      <div class="import-actions">${actionButton}${retryButton}</div>
+    </div>
+  `;
+}
+
+function renderTranscriptPreviewDetails(title, text, detailsClassName) {
+  const normalizedText = String(text || '').trim();
+  if (!normalizedText) {
+    return '';
+  }
+
+  return `
+    <details class="import-preview-details ${detailsClassName}">
+      <summary>${escapeHtml(title)} <span>${normalizedText.length} characters</span></summary>
+      <pre class="import-preview-text">${escapeHtml(normalizedText)}</pre>
+    </details>
+  `;
+}
+
+function renderAiCleanupReviewSummary() {
+  if (!isRawTeamsImportMode() || !state.importReview.cleanedTranscript) {
+    return '';
+  }
+
+  const uncertainties = Array.isArray(state.importReview.uncertainties) ? state.importReview.uncertainties : [];
+  const uncertaintyMarkup = uncertainties.length
+    ? `<ul class="import-uncertainty-list">${uncertainties.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+    : '<p class="entity-meta">No uncertainties were returned.</p>';
+
+  return `
+    <div class="import-preview-panel">
+      <div class="section-heading">
+        <h4>AI cleanup completed</h4>
+      </div>
+      <div class="import-ai-summary-grid">
+        <div><strong>Summary points</strong><span>${convertReviewTextToLines(state.importReview.summary).length}</span></div>
+        <div><strong>Decisions</strong><span>${convertReviewTextToLines(state.importReview.decisions).length}</span></div>
+        <div><strong>Actions</strong><span>${convertReviewTextToLines(state.importReview.actions).length}</span></div>
+        <div><strong>Open questions</strong><span>${convertReviewTextToLines(state.importReview.openQuestions).length}</span></div>
+        <div><strong>Uncertainties</strong><span>${uncertainties.length}</span></div>
+      </div>
+      <div class="import-uncertainty-panel">
+        <h5>Uncertainties to review</h5>
+        <p class="entity-meta">AI-generated meeting content must be reviewed before saving.</p>
+        ${uncertaintyMarkup}
+      </div>
+    </div>
+  `;
+}
+
 function renderImport() {
   const selectedFile = state.importSelectedFile;
   const reviewVisible = Boolean(selectedFile);
+  const rawMode = isRawTeamsImportMode();
   const errorMessage = state.importError
     ? `<p class="import-error" role="alert">${escapeHtml(state.importError)}</p>`
     : '';
   const successMessage = state.importSuccessMessage
     ? `<p class="import-success" role="status">${escapeHtml(state.importSuccessMessage)}</p>`
     : '';
+  const warningMessages = renderImportWarnings();
   const saveStatusMessage = state.importSaveInProgress && state.importSaveStatus
     ? `<p class="import-hint" role="status">${escapeHtml(state.importSaveStatus)}</p>`
     : '';
+  const uploadHeading = rawMode ? 'Upload a raw Microsoft Teams transcript' : 'Upload a cleaned meeting transcript';
+  const uploadDescription = rawMode
+    ? 'Select a raw English Microsoft Teams DOCX transcript. The app extracts plain text locally, then sends only that text through the authenticated AI cleanup function after you explicitly start cleanup.'
+    : 'Select a cleaned DOCX file to start the review step. The app extracts the text in the browser and pre-fills the review fields.';
   const fileSummary = selectedFile
     ? `
       <div class="import-file-summary" role="status">
-        <p class="import-file-name">${escapeHtml(selectedFile.name)}</p>
-        <p class="import-file-size">${escapeHtml(formatFileSize(selectedFile.size))}</p>
+        <div>
+          <p class="import-file-name">${escapeHtml(selectedFile.name)}</p>
+          <p class="import-file-size">${escapeHtml(formatFileSize(selectedFile.size))}</p>
+        </div>
+        <div class="import-file-summary-meta">
+          ${rawMode && state.importRawTranscriptText ? `<p class="import-file-size">${state.importRawTranscriptText.length} extracted characters</p>` : ''}
+        </div>
       </div>
     `
-    : '<p class="import-hint">Choose a cleaned DOCX transcript to begin the review workflow.</p>';
+    : `<p class="import-hint">Choose a ${rawMode ? 'raw Microsoft Teams' : 'cleaned Tasklet'} DOCX transcript to begin the review workflow.</p>`;
 
   const extractionStatus = state.importExtracting
-    ? '<p class="import-hint">Extracting document content…</p>'
+    ? `<p class="import-hint">${rawMode ? 'Reading Teams transcript…' : 'Extracting document content…'}</p>`
     : '';
   const extractionError = state.importExtractionError
     ? `<p class="import-error" role="alert">${escapeHtml(state.importExtractionError)}</p>`
     : '';
-  const previewPanel = state.importExtractedText || state.importExtracting || state.importExtractionError
+  const cleanedPreviewPanel = !rawMode && (state.importExtractedText || state.importExtracting || state.importExtractionError)
     ? `
       <div class="import-preview-panel">
         <div class="section-heading">
@@ -5321,6 +6135,27 @@ function renderImport() {
           <h5>HTML preview</h5>
           <pre class="import-preview-html">${escapeHtml(getImportPreviewExcerpt(state.importExtractedHtml, 1200) || 'No HTML preview available yet.')}</pre>
         </div>
+      </div>
+    `
+    : '';
+  const teamsDetection = state.importTeamsDetection || createEmptyTeamsStructureDetection();
+  const teamsDetectionPanel = rawMode && reviewVisible
+    ? `
+      <div class="import-preview-panel">
+        <div class="section-heading">
+          <h4>Teams structure detection</h4>
+        </div>
+        <p class="entity-meta">English transcripts only in this first version.</p>
+        <ul class="import-detected-list">
+          ${teamsDetection.indicators.map((indicator) => `<li class="import-detected-section ${indicator.matched ? 'found' : 'missing'}"><span>${escapeHtml(indicator.label)}</span><strong>${indicator.matched ? 'Found' : 'Missing'}</strong></li>`).join('')}
+        </ul>
+        ${teamsDetection.warning ? `<p class="import-warning" role="status">${escapeHtml(teamsDetection.warning)}</p>` : ''}
+        ${teamsDetection.requiresConfirmation ? `
+          <label class="import-confirmation-row">
+            <input class="js-import-teams-confirmation" type="checkbox" ${state.importTeamsConfirmation ? 'checked' : ''}>
+            <span>I confirm that this is an English Microsoft Teams transcript.</span>
+          </label>
+        ` : ''}
       </div>
     `
     : '';
@@ -5342,9 +6177,13 @@ function renderImport() {
   const detectedSectionsPanel = reviewVisible ? `
     <div class="import-preview-panel">
       <div class="section-heading">
-        <h4>Detected sections</h4>
+        <h4>${rawMode ? 'Review readiness' : 'Detected sections'}</h4>
       </div>
-      <ul class="import-detected-list">${detectedSections}</ul>
+      <ul class="import-detected-list">${rawMode ? `
+        <li class="import-detected-section ${state.importRawTranscriptText ? 'found' : 'missing'}"><span>Raw transcript extracted locally</span><strong>${state.importRawTranscriptText ? 'Ready' : 'Missing'}</strong></li>
+        <li class="import-detected-section ${state.importReview.cleanedTranscript ? 'found' : 'missing'}"><span>AI-cleaned transcript available</span><strong>${state.importReview.cleanedTranscript ? 'Ready' : 'Pending'}</strong></li>
+        <li class="import-detected-section ${canRunAiCleanup() ? 'found' : 'missing'}"><span>Ready for AI cleanup</span><strong>${canRunAiCleanup() ? 'Yes' : 'Not yet'}</strong></li>
+      ` : detectedSections}</ul>
     </div>
   ` : '';
 
@@ -5381,6 +6220,38 @@ function renderImport() {
       </div>
     </details>
   ` : '';
+
+  const aiCleanupActions = rawMode && reviewVisible ? `
+    <div class="import-preview-panel">
+      <div class="section-heading">
+        <div>
+          <h4>AI cleanup</h4>
+        </div>
+      </div>
+      <p class="entity-meta">The transcript text is sent securely to the configured AI cleanup service to create a structured meeting record.</p>
+      <p class="entity-meta">AI-generated meeting content must be reviewed before saving.</p>
+      <div class="import-notes">
+        <p class="entity-meta">Transcript size: ${state.importRawTranscriptText ? `${state.importRawTranscriptText.length} characters` : 'Not extracted yet'}</p>
+      </div>
+      <div class="import-actions">
+        <button class="primary-button js-start-ai-cleanup" type="button" ${canRunAiCleanup() ? '' : 'disabled'}>${state.importAiCleanup.inProgress ? 'Cleaning…' : 'Clean with AI'}</button>
+      </div>
+    </div>
+  ` : '';
+
+  const rawPreviewPanel = rawMode && reviewVisible
+    ? `
+      <div class="import-preview-panel">
+        <div class="section-heading">
+          <h4>Transcript previews</h4>
+        </div>
+        ${renderTranscriptPreviewDetails('Raw Teams transcript', state.importRawTranscriptText, 'raw-transcript-preview')}
+        ${renderTranscriptPreviewDetails('AI-cleaned transcript', state.importReview.cleanedTranscript, 'cleaned-transcript-preview')}
+      </div>
+    `
+    : '';
+
+  const aiReviewSummary = renderAiCleanupReviewSummary();
 
   const reviewPanel = reviewVisible ? `
     <div class="import-review-panel">
@@ -5420,10 +6291,35 @@ function renderImport() {
           <span>Subject</span>
           <textarea class="import-field import-field--textarea js-import-review-field" data-review-field="subject" placeholder="Subject">${escapeHtml(state.importReview.subject)}</textarea>
         </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Summary</span>
+          <textarea class="import-field import-field--textarea js-import-review-field" data-review-field="summary" placeholder="One point per line">${escapeHtml(state.importReview.summary)}</textarea>
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Decisions</span>
+          <textarea class="import-field import-field--textarea js-import-review-field" data-review-field="decisions" placeholder="One point per line">${escapeHtml(state.importReview.decisions)}</textarea>
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Actions</span>
+          <textarea class="import-field import-field--textarea js-import-review-field" data-review-field="actions" placeholder="Readable action lines compatible with the Actions page">${escapeHtml(state.importReview.actions)}</textarea>
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Open questions</span>
+          <textarea class="import-field import-field--textarea js-import-review-field" data-review-field="openQuestions" placeholder="One point per line">${escapeHtml(state.importReview.openQuestions)}</textarea>
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>Commercial notes</span>
+          <textarea class="import-field import-field--textarea js-import-review-field" data-review-field="commercialNotes" placeholder="One point per line">${escapeHtml(state.importReview.commercialNotes)}</textarea>
+        </label>
+        <label class="import-field-group import-field-group--full">
+          <span>${rawMode ? 'AI-cleaned transcript' : 'Cleaned transcript'}</span>
+          <textarea class="import-field import-field--textarea import-field--transcript js-import-review-field" data-review-field="cleanedTranscript" placeholder="Transcript text">${escapeHtml(state.importReview.cleanedTranscript)}</textarea>
+        </label>
       </div>
+      ${renderImportExtraSectionEditors()}
       <div class="import-actions">
         <button class="primary-button js-save-import-meeting" type="button">Save Meeting</button>
-        <p class="import-note">A valid title, date, and DOCX file are required before saving. The review values are prefilled from the extracted transcript whenever available.</p>
+        <p class="import-note">A valid title, date, and DOCX file are required before saving. The review values are prefilled from extracted or AI-cleaned content whenever available.</p>
       </div>
     </div>
   ` : '';
@@ -5433,31 +6329,49 @@ function renderImport() {
       <div class="section-heading">
         <div>
           <p class="eyebrow">Import transcript</p>
-          <h3>Upload a cleaned meeting transcript</h3>
+          <h3>${uploadHeading}</h3>
         </div>
       </div>
-      <p class="import-description">Select a DOCX file to start the review step. The app extracts the text in the browser and pre-fills the review fields.</p>
+      <div class="import-mode-selector" role="radiogroup" aria-label="Import mode">
+        <button class="import-mode-card js-import-mode-toggle ${rawMode ? '' : 'active'}" type="button" data-import-mode="${IMPORT_MODES.CLEANED_DOCX}" aria-pressed="${rawMode ? 'false' : 'true'}">
+          <strong>Cleaned Tasklet Transcript</strong>
+          <span>Default mode for already-cleaned DOCX transcripts.</span>
+        </button>
+        <button class="import-mode-card js-import-mode-toggle ${rawMode ? 'active' : ''}" type="button" data-import-mode="${IMPORT_MODES.RAW_TEAMS_AI}" aria-pressed="${rawMode ? 'true' : 'false'}">
+          <strong>Raw Microsoft Teams Transcript</strong>
+          <span>English transcripts only. Local text extraction, then authenticated AI cleanup.</span>
+        </button>
+      </div>
+
+      <p class="import-description">${uploadDescription}</p>
 
       <div id="import-dropzone" class="import-dropzone">
         <input id="import-file-input" class="sr-only" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document">
         <p class="import-dropzone-title">Drag and drop your DOCX transcript here</p>
-        <p class="import-dropzone-description">Only .docx files are supported for this prototype.</p>
+        <p class="import-dropzone-description">Only .docx files are supported.</p>
         <button class="secondary-button import-file-trigger" type="button">Choose DOCX file</button>
       </div>
 
       <div class="import-notes">
         <p class="entity-meta">Supported format: .docx only</p>
         <p class="entity-meta">Maximum file size: 10 MB</p>
+        ${rawMode ? '<p class="entity-meta">Raw Teams cleanup currently supports English transcripts only.</p>' : ''}
       </div>
 
       ${errorMessage}
+      ${warningMessages}
       ${successMessage}
       ${saveStatusMessage}
       ${extractionStatus}
       ${extractionError}
       ${fileSummary}
-      ${previewPanel}
+      ${cleanedPreviewPanel}
+      ${teamsDetectionPanel}
       ${detectedSectionsPanel}
+      ${aiCleanupActions}
+      ${renderImportAiCleanupProgress()}
+      ${aiReviewSummary}
+      ${rawPreviewPanel}
       ${debugPanel}
       ${reviewPanel}
     </section>
@@ -5541,14 +6455,8 @@ async function handleImportFileSelection(file) {
     return;
   }
 
-  state.importSuccessMessage = '';
-  state.importSaveStatus = '';
-  state.importExtractionError = '';
-  state.importExtractedText = '';
-  state.importExtractedHtml = '';
-  state.importExtractedSections = createEmptyExtractedSections();
-  resetImportParserDebugState();
-  state.importReview = createEmptyImportReview();
+  clearImportAiCleanupTimer();
+  resetImportTransientState();
 
   const fileValidation = getValidatedImportDocxFile(file);
   if (!fileValidation.valid) {
@@ -5565,15 +6473,42 @@ async function handleImportFileSelection(file) {
   updateImportSaveButtonState();
 
   try {
-    const extractionResult = await extractDocumentContent(file);
-    state.importExtractedText = extractionResult.text || '';
-    state.importExtractedHtml = extractionResult.html || '';
-    state.importExtractedSections = extractTranscriptSections(state.importExtractedText, state.importExtractedHtml);
-    const metadata = parseTranscriptMetadata(state.importExtractedText, state.importExtractedHtml);
-    if (canExposeParserDebug()) {
-      state.importParserDebug.metadata = metadata;
+    if (isRawTeamsImportMode()) {
+      const rawTranscriptText = await extractDocumentRawText(file);
+      const textValidation = validateExtractedRawTranscriptText(rawTranscriptText);
+      if (!textValidation.valid) {
+        throw new Error(textValidation.error);
+      }
+
+      state.importRawTranscriptText = textValidation.text;
+      state.importExtractedText = textValidation.text;
+      state.importExtractedHtml = '';
+      state.importExtractedSections = createEmptyExtractedSections();
+      state.importReview = {
+        ...createEmptyImportReview(),
+        sourceType: IMPORT_MODES.RAW_TEAMS_AI
+      };
+
+      const detection = detectLikelyTeamsTranscriptStructure(textValidation.text);
+      state.importTeamsDetection = detection;
+      if (detection.warning) {
+        state.importWarnings = [detection.warning];
+      }
+      updateImportParserDebugForTeamsDetection(detection);
+    } else {
+      const extractionResult = await extractDocumentContent(file);
+      state.importExtractedText = extractionResult.text || '';
+      state.importExtractedHtml = extractionResult.html || '';
+      state.importExtractedSections = extractTranscriptSections(state.importExtractedText, state.importExtractedHtml);
+      const metadata = parseTranscriptMetadata(state.importExtractedText, state.importExtractedHtml);
+      if (canExposeParserDebug()) {
+        state.importParserDebug.metadata = metadata;
+      }
+      applyExtractedMetadataToReview(state.importExtractedText, state.importExtractedHtml);
+      syncImportReviewContentFromSections(state.importExtractedSections, IMPORT_MODES.CLEANED_DOCX);
+      state.importReview.sourceType = IMPORT_MODES.CLEANED_DOCX;
     }
-    applyExtractedMetadataToReview(state.importExtractedText, state.importExtractedHtml);
+
     state.importExtracting = false;
     renderViews();
     updateImportSaveButtonState();
@@ -5648,6 +6583,17 @@ async function handleSaveMeeting() {
     .split(',')
     .map((participant) => participant.trim())
     .filter(Boolean);
+  const summary = convertReviewTextToLines(state.importReview.summary);
+  const decisions = convertReviewTextToLines(state.importReview.decisions);
+  const actions = convertReviewTextToLines(state.importReview.actions);
+  const openQuestions = convertReviewTextToLines(state.importReview.openQuestions);
+  const commercialNotes = convertReviewTextToLines(state.importReview.commercialNotes);
+  const cleanedTranscript = sanitizePlainText(state.importReview.cleanedTranscript, 300000);
+  const extraSections = sanitizeReviewExtraSections(state.importReview.extraSections);
+  const extractedText = isRawTeamsImportMode()
+    ? sanitizePlainText(state.importRawTranscriptText, 300000)
+    : sanitizePlainText(state.importExtractedText, 300000);
+  const extractedHtml = isRawTeamsImportMode() ? '' : state.importExtractedHtml;
 
   const meeting = {
     id: meetingId,
@@ -5663,20 +6609,21 @@ async function handleSaveMeeting() {
     participantIds: [],
     subject,
     tags: [],
-    summary: state.importExtractedSections.summary,
-    decisions: state.importExtractedSections.decisions,
-    openQuestions: state.importExtractedSections.openQuestions,
-    commercialNotes: state.importExtractedSections.commercialNotes,
-    actions: state.importExtractedSections.actions,
+    summary,
+    decisions,
+    openQuestions,
+    commercialNotes,
+    actions,
     actionItemIds: [],
-    transcript: state.importExtractedText,
-    extractedText: state.importExtractedText,
-    extractedHtml: state.importExtractedHtml,
-    cleanedTranscript: state.importExtractedSections.cleanedTranscript,
-    extraSections: state.importExtractedSections.extraSections.map((section) => ({
+    transcript: extractedText,
+    extractedText,
+    extractedHtml,
+    cleanedTranscript,
+    extraSections: extraSections.map((section) => ({
       heading: section.heading,
       lines: [...section.lines]
     })),
+    sourceType: getActiveImportSourceType(),
     storageBucket: uploadResult.storageBucket,
     storagePath: uploadResult.storagePath,
     originalFileName: uploadResult.originalFileName,
@@ -5712,13 +6659,7 @@ async function handleSaveMeeting() {
   const savedMeeting = mapDatabaseRowToMeeting(data);
   state.savedMeetings = [savedMeeting, ...state.savedMeetings].sort(compareMeetingsNewestFirst);
   state.importSelectedFile = null;
-  state.importReview = createEmptyImportReview();
-  state.importExtracting = false;
-  state.importExtractionError = '';
-  state.importExtractedText = '';
-  state.importExtractedHtml = '';
-  state.importExtractedSections = createEmptyExtractedSections();
-  resetImportParserDebugState();
+  resetImportTransientState({ preserveSuccessMessage: true });
   state.importSuccessMessage = `Meeting saved successfully as ${savedMeeting.title}.`;
   state.importSaveInProgress = false;
   state.importSaveStatus = '';
@@ -6325,6 +7266,64 @@ function attachInteractions() {
       }
 
       updateImportSaveButtonState();
+    });
+  });
+
+  document.querySelectorAll('.js-import-extra-section-heading').forEach((field) => {
+    field.addEventListener('input', () => {
+      const sectionIndex = Number(field.dataset.extraSectionIndex);
+      if (!Number.isInteger(sectionIndex) || sectionIndex < 0 || !Array.isArray(state.importReview.extraSections) || !state.importReview.extraSections[sectionIndex]) {
+        return;
+      }
+
+      state.importReview.extraSections[sectionIndex].heading = field.value;
+    });
+  });
+
+  document.querySelectorAll('.js-import-extra-section-lines').forEach((field) => {
+    field.addEventListener('input', () => {
+      const sectionIndex = Number(field.dataset.extraSectionIndex);
+      if (!Number.isInteger(sectionIndex) || sectionIndex < 0 || !Array.isArray(state.importReview.extraSections) || !state.importReview.extraSections[sectionIndex]) {
+        return;
+      }
+
+      state.importReview.extraSections[sectionIndex].lines = field.value.split(/\r?\n/);
+    });
+  });
+
+  document.querySelectorAll('.js-import-mode-toggle').forEach((button) => {
+    button.addEventListener('click', () => {
+      const nextMode = button.dataset.importMode;
+      if (nextMode) {
+        setImportMode(nextMode);
+      }
+    });
+  });
+
+  const teamsConfirmation = document.querySelector('.js-import-teams-confirmation');
+  if (teamsConfirmation) {
+    teamsConfirmation.checked = state.importTeamsConfirmation;
+    teamsConfirmation.addEventListener('change', () => {
+      state.importTeamsConfirmation = teamsConfirmation.checked;
+      renderViews();
+    });
+  }
+
+  document.querySelectorAll('.js-start-ai-cleanup').forEach((button) => {
+    button.addEventListener('click', () => {
+      handleStartAiCleanup();
+    });
+  });
+
+  document.querySelectorAll('.js-cancel-ai-cleanup').forEach((button) => {
+    button.addEventListener('click', () => {
+      handleCancelAiCleanup();
+    });
+  });
+
+  document.querySelectorAll('.js-retry-ai-cleanup').forEach((button) => {
+    button.addEventListener('click', () => {
+      handleStartAiCleanup();
     });
   });
 
