@@ -3473,6 +3473,119 @@ function normalizeSearchText(value) {
     .trim();
 }
 
+function isLikelyCleanEntityName(value) {
+  const normalized = normalizeCompanyName(value);
+  if (!normalized || normalized.length < 2 || normalized.length > 120) {
+    return false;
+  }
+
+  return /[A-Za-z]/.test(normalized);
+}
+
+function cleanupEntityDisplayName(value) {
+  const normalized = normalizeCompanyName(value);
+  if (!normalized) {
+    return '';
+  }
+
+  const separatorRules = [
+    /\s+-\s+/,
+    /,\s+based\s+in\b/i,
+    /,\s+a\s+/i
+  ];
+
+  for (const rule of separatorRules) {
+    const match = normalized.match(rule);
+    if (!match || typeof match.index !== 'number') {
+      continue;
+    }
+
+    const candidate = normalizeCompanyName(normalized.slice(0, match.index));
+    if (isLikelyCleanEntityName(candidate)) {
+      return candidate;
+    }
+  }
+
+  const periodIndex = normalized.indexOf('. ');
+  if (periodIndex > 1) {
+    const candidate = normalizeCompanyName(normalized.slice(0, periodIndex));
+    const trailingText = normalizeCompanyName(normalized.slice(periodIndex + 2));
+    const candidateWords = candidate.split(' ').filter(Boolean);
+    if (
+      candidateWords.length >= 2
+      && trailingText.length > 18
+      && /^[A-Z]/.test(trailingText)
+      && isLikelyCleanEntityName(candidate)
+      && !/[A-Z]$/.test(candidate)
+    ) {
+      return candidate;
+    }
+  }
+
+  return normalized;
+}
+
+function looksLikeCompanyTag(value) {
+  const normalized = normalizeCompanyName(value);
+  if (!normalized) {
+    return false;
+  }
+
+  if (looksLikeCompanyValue(normalized)) {
+    return true;
+  }
+
+  return /^[A-Z0-9&.-]{2,10}$/.test(normalized);
+}
+
+function getParticipantDisplayParts(value) {
+  const originalLabel = normalizeCompanyName(value);
+  if (!originalLabel) {
+    return {
+      displayName: '',
+      displayCompany: ''
+    };
+  }
+
+  const compactLabel = originalLabel.replace(/\(not named in transcript\)/gi, '').trim();
+  const slashParts = compactLabel.split('/').map((part) => normalizeCompanyName(part)).filter(Boolean);
+  if (slashParts.length === 2 && looksLikePersonName(slashParts[0]) && looksLikeCompanyTag(slashParts[1])) {
+    return {
+      displayName: slashParts[0],
+      displayCompany: slashParts[1]
+    };
+  }
+
+  const dividerMatch = compactLabel.match(/^(.+?)\s+[I|]\s+(.+)$/);
+  if (dividerMatch) {
+    const nameCandidate = normalizeCompanyName(dividerMatch[1]);
+    const companyCandidate = normalizeCompanyName(dividerMatch[2]);
+    if (looksLikePersonName(nameCandidate) && looksLikeCompanyTag(companyCandidate)) {
+      return {
+        displayName: nameCandidate,
+        displayCompany: companyCandidate
+      };
+    }
+  }
+
+  const bracketMatch = compactLabel.match(/^(.+?)\s*\[([^\]]+)\]\s*$/);
+  if (bracketMatch) {
+    const nameCandidate = normalizeCompanyName(bracketMatch[1]);
+    const companyCandidate = normalizeCompanyName(bracketMatch[2]);
+    if (looksLikePersonName(nameCandidate) && looksLikeCompanyTag(companyCandidate)) {
+      return {
+        displayName: nameCandidate,
+        displayCompany: companyCandidate
+      };
+    }
+  }
+
+  return {
+    displayName: compactLabel,
+    displayCompany: ''
+  };
+}
+
 function includesSearchText(value, normalizedQuery) {
   if (!normalizedQuery) {
     return false;
@@ -3608,13 +3721,13 @@ function getGlobalSearchResults() {
 
   const allCustomerMatches = getCustomersFromMeetings()
     .filter((customer) => {
-      const searchBlob = [customer.name, customer.relatedNames.join(' '), customer.latestMeetingDate].join(' ');
+      const searchBlob = [customer.displayName || customer.name, customer.name, customer.relatedNames.join(' '), customer.latestMeetingDate].join(' ');
       return includesSearchText(searchBlob, normalizedQuery);
     })
     .map((customer) => ({
       type: 'customer',
       id: customer.key,
-      title: customer.name,
+      title: customer.displayName || customer.name,
       detail: `${customer.meetings.length} meetings`
     }));
 
@@ -3622,13 +3735,13 @@ function getGlobalSearchResults() {
 
   const allPartnerMatches = getPartnersFromMeetings()
     .filter((partner) => {
-      const searchBlob = [partner.name, partner.relatedNames.join(' '), partner.latestMeetingDate].join(' ');
+      const searchBlob = [partner.displayName || partner.name, partner.name, partner.relatedNames.join(' '), partner.latestMeetingDate].join(' ');
       return includesSearchText(searchBlob, normalizedQuery);
     })
     .map((partner) => ({
       type: 'partner',
       id: partner.key,
-      title: partner.name,
+      title: partner.displayName || partner.name,
       detail: `${partner.meetings.length} meetings`
     }));
 
@@ -3636,13 +3749,13 @@ function getGlobalSearchResults() {
 
   const allParticipantMatches = getParticipantsFromMeetings()
     .filter((participant) => {
-      const searchBlob = [participant.name, participant.companies.join(' '), participant.fallbackEntry].join(' ');
+      const searchBlob = [participant.displayName || participant.name, participant.displayCompany || '', participant.name, participant.companies.join(' '), participant.fallbackEntry].join(' ');
       return includesSearchText(searchBlob, normalizedQuery);
     })
     .map((participant) => ({
       type: 'participant',
       id: participant.key,
-      title: participant.name,
+      title: participant.displayName || participant.name,
       detail: `${participant.meetings.length} meetings`
     }));
 
@@ -4511,10 +4624,14 @@ function getParticipantsFromMeetings() {
       const sortedMeetings = [...group.meetings].sort(compareMeetingsNewestFirst);
       const companies = Array.from(group.companies).sort((a, b) => a.localeCompare(b));
       const fallbackEntry = Array.from(group.originalEntries).find(Boolean) || group.name;
+      const participantDisplay = getParticipantDisplayParts(group.name || fallbackEntry);
+      const displayCompany = participantDisplay.displayCompany || companies[0] || '';
 
       return {
         key: group.key,
         name: group.name,
+        displayName: participantDisplay.displayName || group.name || fallbackEntry,
+        displayCompany,
         companies,
         fallbackEntry,
         meetings: sortedMeetings,
@@ -4533,12 +4650,13 @@ function buildEntityGroupsFromMeetings(entityType) {
   const groupsByKey = new Map();
 
   getAllMeetings().forEach((meeting) => {
-    const entityName = entityType === 'customer' ? getMeetingCustomerName(meeting) : getMeetingPartnerName(meeting);
-    if (!entityName) {
+    const rawEntityName = entityType === 'customer' ? getMeetingCustomerName(meeting) : getMeetingPartnerName(meeting);
+    const displayEntityName = cleanupEntityDisplayName(rawEntityName);
+    if (!rawEntityName || !displayEntityName) {
       return;
     }
 
-    const groupingKey = getNameGroupingKey(entityName);
+    const groupingKey = getNameGroupingKey(displayEntityName);
     if (!groupingKey) {
       return;
     }
@@ -4546,7 +4664,8 @@ function buildEntityGroupsFromMeetings(entityType) {
     if (!groupsByKey.has(groupingKey)) {
       groupsByKey.set(groupingKey, {
         key: groupingKey,
-        name: entityName,
+        name: rawEntityName,
+        displayName: displayEntityName,
         meetings: [],
         relatedNames: new Set(),
         openActions: 0
@@ -4576,11 +4695,11 @@ function buildEntityGroupsFromMeetings(entityType) {
       return {
         ...group,
         meetings: sortedMeetings,
-        relatedNames: Array.from(group.relatedNames).sort((a, b) => a.localeCompare(b)),
+        relatedNames: Array.from(group.relatedNames).filter(Boolean).sort((a, b) => a.localeCompare(b)),
         latestMeetingDate: sortedMeetings.length && sortedMeetings[0].date ? sortedMeetings[0].date : ''
       };
     })
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
 }
 
 function getCustomersFromMeetings() {
@@ -5184,21 +5303,13 @@ function renderCustomers() {
 
   const list = customerGroups.length
     ? customerGroups.map((customer) => {
-      const meetingCount = customer.meetings.length;
-      const partnersLabel = customer.relatedNames.length ? customer.relatedNames.join(', ') : 'No partners captured';
       const latestMeetingDate = customer.latestMeetingDate ? formatDate(customer.latestMeetingDate) : 'Date not available';
 
       return `
-        <button class="entity-card meeting-card--selectable js-open-customer-detail" type="button" data-customer-key="${escapeHtml(customer.key)}">
-          <h4>${escapeHtml(customer.name)}</h4>
-          <p>Latest meeting: ${escapeHtml(latestMeetingDate)}</p>
-          <div class="entity-meta">
-            <span class="badge">${meetingCount} meetings</span>
-            <span>Partners: ${escapeHtml(partnersLabel)}</span>
-          </div>
-          <div class="entity-meta">
-            <span>Open actions: ${customer.openActions}</span>
-          </div>
+        <button class="entity-card entity-directory-card meeting-card--selectable js-open-customer-detail" type="button" data-customer-key="${escapeHtml(customer.key)}">
+          <h4>${escapeHtml(customer.displayName || customer.name)}</h4>
+          <p class="entity-directory-summary">${customer.meetings.length} ${customer.meetings.length === 1 ? 'meeting' : 'meetings'} · Latest ${escapeHtml(latestMeetingDate)}</p>
+          <p class="entity-directory-meta">${customer.openActions} open ${customer.openActions === 1 ? 'action' : 'actions'}</p>
         </button>
       `;
     }).join('')
@@ -5209,7 +5320,7 @@ function renderCustomers() {
       <div class="section-heading">
         <h3>Customers</h3>
       </div>
-      <div class="entity-list">${list}</div>
+      <div class="entity-list entity-grid entity-grid--customers">${list}</div>
     </section>
   `;
 }
@@ -5274,19 +5385,12 @@ function renderPartners() {
   const list = partnerGroups.length
     ? partnerGroups.map((partner) => {
       const latestMeetingDate = partner.latestMeetingDate ? formatDate(partner.latestMeetingDate) : 'Date not available';
-      const customersLabel = partner.relatedNames.length ? partner.relatedNames.join(', ') : 'No customers captured';
 
       return `
-        <button class="entity-card meeting-card--selectable js-open-partner-detail" type="button" data-partner-key="${escapeHtml(partner.key)}">
-          <h4>${escapeHtml(partner.name)}</h4>
-          <p>Latest meeting: ${escapeHtml(latestMeetingDate)}</p>
-          <div class="entity-meta">
-            <span class="badge">${partner.meetings.length} meetings</span>
-            <span>Customers: ${escapeHtml(customersLabel)}</span>
-          </div>
-          <div class="entity-meta">
-            <span>Open actions: ${partner.openActions}</span>
-          </div>
+        <button class="entity-card entity-directory-card meeting-card--selectable js-open-partner-detail" type="button" data-partner-key="${escapeHtml(partner.key)}">
+          <h4>${escapeHtml(partner.displayName || partner.name)}</h4>
+          <p class="entity-directory-summary">${partner.meetings.length} ${partner.meetings.length === 1 ? 'meeting' : 'meetings'} · Latest ${escapeHtml(latestMeetingDate)}</p>
+          <p class="entity-directory-meta">${partner.openActions} open ${partner.openActions === 1 ? 'action' : 'actions'}</p>
         </button>
       `;
     }).join('')
@@ -5297,7 +5401,7 @@ function renderPartners() {
       <div class="section-heading">
         <h3>Partners</h3>
       </div>
-      <div class="entity-list">${list}</div>
+      <div class="entity-list entity-grid entity-grid--partners">${list}</div>
     </section>
   `;
 }
@@ -5363,20 +5467,15 @@ function renderParticipants() {
 
   const list = participantGroups.length
     ? participantGroups.map((participant) => {
-      const companyLabel = participant.companies.length ? participant.companies.join(', ') : 'Company not confirmed';
+      const companyLabel = participant.displayCompany || '';
       const latestMeetingDate = participant.latestMeetingDate ? formatDate(participant.latestMeetingDate) : 'Date not available';
 
       return `
-        <button class="entity-card meeting-card--selectable js-open-participant-detail" type="button" data-participant-key="${escapeHtml(participant.key)}">
-          <h4>${escapeHtml(participant.name)}</h4>
-          <p>${escapeHtml(companyLabel)}</p>
-          <div class="entity-meta">
-            <span class="badge">${participant.meetings.length} meetings</span>
-            <span>Latest: ${escapeHtml(latestMeetingDate)}</span>
-          </div>
-          <div class="entity-meta">
-            <span>Open actions: ${participant.openActions}</span>
-          </div>
+        <button class="entity-card entity-directory-card meeting-card--selectable js-open-participant-detail" type="button" data-participant-key="${escapeHtml(participant.key)}">
+          <h4>${escapeHtml(participant.displayName || participant.name)}</h4>
+          ${companyLabel ? `<p class="entity-directory-company">${escapeHtml(companyLabel)}</p>` : ''}
+          <p class="entity-directory-summary">${participant.meetings.length} ${participant.meetings.length === 1 ? 'meeting' : 'meetings'} · Latest ${escapeHtml(latestMeetingDate)}</p>
+          <p class="entity-directory-meta">${participant.openActions} open ${participant.openActions === 1 ? 'action' : 'actions'}</p>
         </button>
       `;
     }).join('')
@@ -5387,7 +5486,7 @@ function renderParticipants() {
       <div class="section-heading">
         <h3>Participants</h3>
       </div>
-      <div class="entity-list">${list}</div>
+      <div class="entity-list entity-grid entity-grid--participants">${list}</div>
     </section>
   `;
 }
