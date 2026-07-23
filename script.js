@@ -124,10 +124,24 @@ function getSupabaseClientInitializationResult() {
   const url = typeof SUPABASE_URL === 'string' ? SUPABASE_URL.trim() : '';
   const publishableKey = typeof SUPABASE_PUBLISHABLE_KEY === 'string' ? SUPABASE_PUBLISHABLE_KEY.trim() : '';
 
-  if (!url || !publishableKey) {
+  if (!url && !publishableKey) {
     return {
       client: null,
-      error: 'Supabase authentication is not configured. Set SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY in supabase-config.js.'
+      error: 'Supabase configuration is incomplete. Missing project URL and publishable key in supabase-config.js.'
+    };
+  }
+
+  if (!url) {
+    return {
+      client: null,
+      error: 'Supabase configuration is incomplete. Missing project URL in supabase-config.js.'
+    };
+  }
+
+  if (!publishableKey) {
+    return {
+      client: null,
+      error: 'Supabase configuration is incomplete. Missing publishable key in supabase-config.js.'
     };
   }
 
