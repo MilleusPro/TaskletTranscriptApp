@@ -995,6 +995,138 @@ textarea:disabled {
   font-size: 14px;
 }
 
+.entity-account-panel {
+  padding: var(--space-4) var(--space-5);
+}
+
+.entity-account-heading {
+  margin-bottom: var(--space-3);
+}
+
+.entity-account-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.entity-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-muted);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.entity-chip strong {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+}
+
+.entity-chip--wide {
+  border-radius: var(--radius-sm);
+}
+
+.entity-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.entity-filter-chip {
+  min-height: 34px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: #fff;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 560;
+}
+
+.entity-filter-chip span {
+  margin-left: 6px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.entity-filter-chip.active {
+  border-color: #9fd5b5;
+  background: #edf9f2;
+}
+
+.entity-filter-chip.active span {
+  color: #1f6d49;
+}
+
+.entity-action-list,
+.entity-history-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.entity-action-row,
+.entity-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
+.entity-action-row-main h4,
+.entity-history-row-main h4 {
+  margin-bottom: var(--space-1);
+  font-size: 16px;
+  color: var(--text-primary);
+}
+
+.entity-action-row-controls,
+.entity-history-row-controls {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 206px;
+}
+
+.entity-action-row-controls .sort-select {
+  max-width: none;
+}
+
+.entity-history-meta {
+  font-size: 13px;
+}
+
+.entity-history-expanded {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.entity-history-expanded p {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.entity-history-expanded strong {
+  color: var(--text-primary);
+}
+
+.entity-history-toggle {
+  margin-top: var(--space-3);
+}
+
 .action-due-date {
   font-weight: 550;
   color: #324b6b;
@@ -1663,6 +1795,22 @@ textarea:disabled {
   .action-card-row--controls {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .entity-action-row,
+  .entity-history-row {
+    grid-template-columns: 1fr;
+  }
+
+  .entity-action-row-controls,
+  .entity-history-row-controls {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .entity-filter-chip {
+    flex: 1 1 calc(50% - var(--space-2));
+    justify-content: center;
   }
 
   .action-card-source-button {

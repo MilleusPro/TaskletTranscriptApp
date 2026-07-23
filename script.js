@@ -24,6 +24,7 @@ const BACKUP_APP_NAME = 'Tasklet Transcript App';
 const BACKUP_VERSION = 1;
 const ACTION_STATUSES = ['Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled'];
 const ACTION_FILTERS = ['All', 'Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled', 'Overdue', 'No due date'];
+const ENTITY_DETAIL_ACTION_FILTERS = ['Active', 'Open', 'Waiting', 'Completed', 'All'];
 const SORT_ORDER_OPTIONS = ['newest', 'oldest'];
 const SUPPORTED_APPLICATION_SETTING_KEYS = ['sortOrder', 'actionFilter'];
 const APPLICATION_SETTING_LABELS = {
@@ -2727,6 +2728,12 @@ const state = {
   selectedParticipantKey: null,
   meetingReturnContext: null,
   actionFilter: 'All',
+  customerDetailActionFiltersByKey: {},
+  partnerDetailActionFiltersByKey: {},
+  customerDetailShowAllMeetingsByKey: {},
+  partnerDetailShowAllMeetingsByKey: {},
+  customerDetailExpandedMeetingsByKey: {},
+  partnerDetailExpandedMeetingsByKey: {},
   actionOverrides: {},
   activeViewerTab: 'overview',
   sortOrder: 'newest',
@@ -2775,6 +2782,79 @@ const state = {
   meetingDocumentDownloadError: '',
   meetingDeletionWarning: ''
 };
+
+function getEntityFilterStateBucket(entityType) {
+  return entityType === 'customer'
+    ? state.customerDetailActionFiltersByKey
+    : state.partnerDetailActionFiltersByKey;
+}
+
+function getEntityShowAllStateBucket(entityType) {
+  return entityType === 'customer'
+    ? state.customerDetailShowAllMeetingsByKey
+    : state.partnerDetailShowAllMeetingsByKey;
+}
+
+function getEntityExpandedMeetingsStateBucket(entityType) {
+  return entityType === 'customer'
+    ? state.customerDetailExpandedMeetingsByKey
+    : state.partnerDetailExpandedMeetingsByKey;
+}
+
+function getEntityDetailActionFilter(entityType, entityKey) {
+  const bucket = getEntityFilterStateBucket(entityType);
+  const selectedFilter = bucket[entityKey];
+  return ENTITY_DETAIL_ACTION_FILTERS.includes(selectedFilter) ? selectedFilter : 'Active';
+}
+
+function setEntityDetailActionFilter(entityType, entityKey, filterValue) {
+  if (!entityKey || !ENTITY_DETAIL_ACTION_FILTERS.includes(filterValue)) {
+    return;
+  }
+
+  const bucket = getEntityFilterStateBucket(entityType);
+  bucket[entityKey] = filterValue;
+}
+
+function shouldShowAllEntityMeetings(entityType, entityKey) {
+  const bucket = getEntityShowAllStateBucket(entityType);
+  return Boolean(bucket[entityKey]);
+}
+
+function setShowAllEntityMeetings(entityType, entityKey, shouldShowAll) {
+  if (!entityKey) {
+    return;
+  }
+
+  const bucket = getEntityShowAllStateBucket(entityType);
+  bucket[entityKey] = Boolean(shouldShowAll);
+}
+
+function getExpandedEntityMeetingIds(entityType, entityKey) {
+  if (!entityKey) {
+    return {};
+  }
+
+  const bucket = getEntityExpandedMeetingsStateBucket(entityType);
+  const value = bucket[entityKey];
+  return value && typeof value === 'object' ? value : {};
+}
+
+function toggleExpandedEntityMeeting(entityType, entityKey, meetingId) {
+  if (!entityKey || !meetingId) {
+    return;
+  }
+
+  const bucket = getEntityExpandedMeetingsStateBucket(entityType);
+  const currentExpanded = getExpandedEntityMeetingIds(entityType, entityKey);
+  const nextExpanded = { ...currentExpanded };
+  if (nextExpanded[meetingId]) {
+    delete nextExpanded[meetingId];
+  } else {
+    nextExpanded[meetingId] = true;
+  }
+  bucket[entityKey] = nextExpanded;
+}
 
 function isSavedMeetingEditable(meetingId) {
   if (!meetingId) {
@@ -4231,6 +4311,68 @@ function filterCombinedActions(actions, selectedFilter) {
   return actions.filter((action) => action.status === selectedFilter);
 }
 
+function isWaitingActionStatus(status) {
+  return status === 'Waiting for Customer' || status === 'Waiting Internally';
+}
+
+function isActiveActionStatus(status) {
+  return status === 'Open' || status === 'In Progress' || isWaitingActionStatus(status);
+}
+
+function filterEntityActionsByScope(actions, selectedFilter) {
+  if (!selectedFilter || selectedFilter === 'All') {
+    return actions;
+  }
+
+  if (selectedFilter === 'Active') {
+    return actions.filter((action) => isActiveActionStatus(action.status));
+  }
+
+  if (selectedFilter === 'Open') {
+    return actions.filter((action) => action.status === 'Open');
+  }
+
+  if (selectedFilter === 'Waiting') {
+    return actions.filter((action) => isWaitingActionStatus(action.status));
+  }
+
+  if (selectedFilter === 'Completed') {
+    return actions.filter((action) => action.status === 'Completed' || action.status === 'Cancelled');
+  }
+
+  return actions;
+}
+
+function getEntityActionFilterCounts(actions) {
+  const counts = {
+    Active: 0,
+    Open: 0,
+    Waiting: 0,
+    Completed: 0,
+    All: actions.length
+  };
+
+  actions.forEach((action) => {
+    if (isActiveActionStatus(action.status)) {
+      counts.Active += 1;
+    }
+
+    if (action.status === 'Open') {
+      counts.Open += 1;
+    }
+
+    if (isWaitingActionStatus(action.status)) {
+      counts.Waiting += 1;
+    }
+
+    if (action.status === 'Completed' || action.status === 'Cancelled') {
+      counts.Completed += 1;
+    }
+  });
+
+  return counts;
+}
+
 async function saveApplicationSettingsToSupabase(nextSettings) {
   if (!supabaseClient || !authState.user || !authState.user.id) {
     return {
@@ -4303,20 +4445,20 @@ async function updateSingleApplicationSetting(settingKey, nextValue) {
 
 async function updateActionOverride(actionId, update) {
   if (!actionId) {
-    return;
+    return false;
   }
 
   if (!supabaseClient || !authState.user || !authState.user.id) {
     state.actionOverridesError = 'You must be signed in to save action updates.';
     renderViews();
-    return;
+    return false;
   }
 
   const sourceAction = getActionById(actionId);
   if (!sourceAction || !sourceAction.sourceMeetingId) {
     state.actionOverridesError = 'The selected action could not be matched to a cloud meeting.';
     renderViews();
-    return;
+    return false;
   }
 
   const currentOverride = state.actionOverrides[actionId] || { actionId, status: '', dueDate: '' };
@@ -4346,21 +4488,21 @@ async function updateActionOverride(actionId, update) {
     if (error) {
       state.actionOverridesError = 'Unable to save action updates to Supabase right now.';
       renderViews();
-      return;
+      return false;
     }
 
     const nextOverrides = { ...state.actionOverrides };
     delete nextOverrides[actionId];
     state.actionOverrides = nextOverrides;
     renderViews();
-    return;
+    return true;
   }
 
   const row = mapActionOverrideToDatabaseRow(nextOverride, authState.user.id, sourceAction.sourceMeetingId);
   if (!row) {
     state.actionOverridesError = 'The action update was invalid and could not be saved.';
     renderViews();
-    return;
+    return false;
   }
 
   const { data, error } = await supabaseClient
@@ -4372,20 +4514,21 @@ async function updateActionOverride(actionId, update) {
   if (error || !data) {
     state.actionOverridesError = 'Unable to save action updates to Supabase right now.';
     renderViews();
-    return;
+    return false;
   }
 
   const savedOverride = mapActionOverrideRowToOverride(data);
   if (!savedOverride) {
     state.actionOverridesError = 'Supabase returned an invalid action update row.';
     renderViews();
-    return;
+    return false;
   }
 
   const nextOverrides = { ...state.actionOverrides };
   nextOverrides[actionId] = savedOverride;
   state.actionOverrides = nextOverrides;
   renderViews();
+  return true;
 }
 
 function splitParticipantEntries(value) {
@@ -4679,12 +4822,12 @@ function buildEntityGroupsFromMeetings(entityType) {
     if (entityType === 'customer') {
       const partnerName = getMeetingPartnerName(meeting);
       if (partnerName) {
-        group.relatedNames.add(partnerName);
+        group.relatedNames.add(cleanupEntityDisplayName(partnerName));
       }
     } else {
       const customerName = getMeetingCustomerName(meeting);
       if (customerName) {
-        group.relatedNames.add(customerName);
+        group.relatedNames.add(cleanupEntityDisplayName(customerName));
       }
     }
   });
@@ -4874,6 +5017,184 @@ function renderMeetingListItem(meeting, options = {}) {
         <div><strong>Open actions</strong><span>${openActions}</span></div>
       </div>
     </button>
+  `;
+}
+
+function getEntityActionsForMeetings(meetings) {
+  const meetingIds = new Set((Array.isArray(meetings) ? meetings : []).map((meeting) => meeting && meeting.id).filter(Boolean));
+  return sortCombinedActions(getCombinedActions().filter((action) => meetingIds.has(action.sourceMeetingId)));
+}
+
+function getMeetingTypeSourceLabel(meeting) {
+  const meetingType = String(meeting && meeting.meetingType ? meeting.meetingType : '').trim();
+  if (meetingType) {
+    return meetingType;
+  }
+
+  if (meeting && meeting.sourceType === IMPORT_MODES.RAW_TEAMS_AI) {
+    return 'AI cleaned';
+  }
+
+  return 'Imported';
+}
+
+function getMeetingSummaryExcerpt(meeting) {
+  const summaryLine = Array.isArray(meeting && meeting.summary) ? normalizeCompanyName(meeting.summary[0]) : '';
+  const fallbackLine = normalizeCompanyName((meeting && meeting.subject) || '');
+  const sourceLine = summaryLine || fallbackLine || 'No summary captured.';
+  return sourceLine.length > 180 ? `${sourceLine.slice(0, 180)}...` : sourceLine;
+}
+
+function renderEntityDetailHeader(entityType, selectedEntity) {
+  const isCustomer = entityType === 'customer';
+  const relatedLabel = isCustomer ? 'Related partners' : 'Related customers';
+  const relatedNames = selectedEntity.relatedNames.length ? selectedEntity.relatedNames : ['None captured'];
+  const latestMeetingDate = selectedEntity.latestMeetingDate ? formatDate(selectedEntity.latestMeetingDate) : 'Date not available';
+
+  return `
+    <section class="panel-card entity-account-panel">
+      <div class="section-heading entity-account-heading">
+        <div>
+          <p class="eyebrow">${isCustomer ? 'Customer detail' : 'Partner detail'}</p>
+          <h3>${escapeHtml(selectedEntity.displayName || selectedEntity.name)}</h3>
+        </div>
+        <button class="secondary-button ${isCustomer ? 'js-back-to-customers' : 'js-back-to-partners'}" type="button">← Return to ${isCustomer ? 'customers' : 'partners'}</button>
+      </div>
+      <div class="entity-account-meta" role="list" aria-label="Account summary">
+        <span class="entity-chip" role="listitem"><strong>Total meetings</strong>${selectedEntity.meetings.length}</span>
+        <span class="entity-chip" role="listitem"><strong>Latest meeting</strong>${escapeHtml(latestMeetingDate)}</span>
+        <span class="entity-chip" role="listitem"><strong>Open actions</strong>${selectedEntity.openActions}</span>
+        <span class="entity-chip entity-chip--wide" role="listitem"><strong>${escapeHtml(relatedLabel)}</strong>${escapeHtml(relatedNames.join(', '))}</span>
+      </div>
+    </section>
+  `;
+}
+
+function renderEntityActionRow(action, options = {}) {
+  const entityType = options.entityType === 'partner' ? 'partner' : 'customer';
+  const selectedEntity = options.selectedEntity || null;
+  const filterValue = options.filterValue || 'Active';
+  const ownerLabel = action.owner || 'Unassigned';
+  const notesLabel = action.notes || '';
+  const dueDateLabel = action.dueDate ? formatDate(action.dueDate) : 'No due date';
+  const dueDateClass = isActionOverdue(action) ? 'action-due-date action-due-date--overdue' : 'action-due-date';
+  const statusClass = getActionStatusClass(action);
+  const statusLabel = getActionStatusLabel(action);
+  const statusOptions = ACTION_STATUSES.map((status) => `
+    <option value="${escapeHtml(status)}" ${status === action.status ? 'selected' : ''}>${escapeHtml(status)}</option>
+  `).join('');
+  const contextLabel = entityType === 'customer'
+    ? `Partner: ${cleanupEntityDisplayName(action.partner || 'Unassigned')}`
+    : `Customer: ${cleanupEntityDisplayName(action.customer || 'Unassigned')}`;
+
+  return `
+    <article class="entity-action-row" data-action-id="${escapeHtml(action.id)}">
+      <div class="entity-action-row-main">
+        <h4>${escapeHtml(action.description)}</h4>
+        <p class="action-meta">Owner: ${escapeHtml(ownerLabel)} <span class="action-card-separator">·</span> <span class="${statusClass}">${escapeHtml(statusLabel)}</span> <span class="action-card-separator">·</span> <span class="${dueDateClass}">Due ${escapeHtml(dueDateLabel)}</span></p>
+        ${notesLabel ? `<p class="entity-meta">Notes: ${escapeHtml(notesLabel)}</p>` : ''}
+        <p class="entity-meta">Source: ${escapeHtml(action.sourceMeetingTitle || 'Unknown meeting')} <span class="action-card-separator">·</span> ${escapeHtml(contextLabel)}</p>
+      </div>
+      <div class="entity-action-row-controls">
+        <label class="sort-label" for="entity-action-status-${escapeHtml(action.id)}">Status</label>
+        <select id="entity-action-status-${escapeHtml(action.id)}" class="sort-select js-action-status" data-action-id="${escapeHtml(action.id)}">${statusOptions}</select>
+        <label class="sort-label" for="entity-action-due-${escapeHtml(action.id)}">Due date</label>
+        <input id="entity-action-due-${escapeHtml(action.id)}" class="sort-select js-action-due-date" data-action-id="${escapeHtml(action.id)}" type="date" value="${escapeHtml(action.dueDate || '')}">
+        ${action.sourceMeetingId ? `<button class="secondary-button js-open-meeting" type="button" data-meeting-id="${escapeHtml(action.sourceMeetingId)}" data-return-section="${entityType === 'customer' ? 'customers' : 'partners'}" data-return-key="${escapeHtml(selectedEntity ? selectedEntity.key : '')}" data-return-filter="${escapeHtml(filterValue)}">Open source meeting</button>` : ''}
+      </div>
+    </article>
+  `;
+}
+
+function renderEntityActionsSection(entityType, selectedEntity) {
+  const selectedFilter = getEntityDetailActionFilter(entityType, selectedEntity.key);
+  const scopedActions = getEntityActionsForMeetings(selectedEntity.meetings);
+  const filteredActions = filterEntityActionsByScope(scopedActions, selectedFilter);
+  const counts = getEntityActionFilterCounts(scopedActions);
+  const errorMessage = state.actionOverridesError
+    ? `<p class="import-error" role="alert">${escapeHtml(state.actionOverridesError)}</p>`
+    : '';
+  const filterButtons = ENTITY_DETAIL_ACTION_FILTERS.map((filterName) => {
+    const isActiveFilter = selectedFilter === filterName;
+    const countValue = Number.isFinite(counts[filterName]) ? counts[filterName] : 0;
+    return `<button class="entity-filter-chip js-entity-action-filter${isActiveFilter ? ' active' : ''}" type="button" data-entity-type="${escapeHtml(entityType)}" data-entity-key="${escapeHtml(selectedEntity.key)}" data-filter="${escapeHtml(filterName)}" aria-pressed="${isActiveFilter ? 'true' : 'false'}">${escapeHtml(filterName)} <span>${countValue}</span></button>`;
+  }).join('');
+  const actionRows = filteredActions.length
+    ? filteredActions.map((action) => renderEntityActionRow(action, { entityType, selectedEntity, filterValue: selectedFilter })).join('')
+    : renderEmptyState('No actions match this filter', 'Try another filter to view more related actions.');
+
+  return `
+    <section class="panel-card">
+      <div class="section-heading">
+        <div>
+          <h3>Actions</h3>
+          <p class="entity-meta">${filteredActions.length} of ${scopedActions.length} related actions shown</p>
+        </div>
+      </div>
+      <div class="entity-filter-row" role="group" aria-label="Entity action filters">
+        ${filterButtons}
+      </div>
+      ${errorMessage}
+      <div class="entity-action-list">${actionRows}</div>
+    </section>
+  `;
+}
+
+function renderEntityMeetingHistorySection(entityType, selectedEntity) {
+  const showAll = shouldShowAllEntityMeetings(entityType, selectedEntity.key);
+  const expandedMeetingIds = getExpandedEntityMeetingIds(entityType, selectedEntity.key);
+  const selectedFilter = getEntityDetailActionFilter(entityType, selectedEntity.key);
+  const allMeetings = selectedEntity.meetings;
+  const visibleMeetings = showAll ? allMeetings : allMeetings.slice(0, 5);
+  const showToggle = allMeetings.length > 5;
+
+  const rows = visibleMeetings.length
+    ? visibleMeetings.map((meeting) => {
+      const participantCount = extractParticipantRecordsFromMeeting(meeting).length;
+      const openActions = getMeetingOpenActionCount(meeting);
+      const detailsId = `entity-meeting-details-${hashTextStable(`${entityType}-${selectedEntity.key}-${meeting.id}`)}`;
+      const isExpanded = Boolean(expandedMeetingIds[meeting.id]);
+      const customerLabel = cleanupEntityDisplayName(getMeetingDisplayCustomer(meeting));
+      const partnerLabel = cleanupEntityDisplayName(getMeetingDisplayPartner(meeting));
+      const subjectText = normalizeCompanyName(meeting.subject) || 'No subject captured';
+      const participantsText = getMeetingDisplayParticipants(meeting);
+      const summaryExcerpt = getMeetingSummaryExcerpt(meeting);
+
+      return `
+        <article class="entity-history-row">
+          <div class="entity-history-row-main">
+            <p class="entity-history-meta">${escapeHtml(formatDate(meeting.date))} <span class="action-card-separator">·</span> ${escapeHtml(getMeetingDurationLabel(meeting))} <span class="action-card-separator">·</span> ${participantCount} participants <span class="action-card-separator">·</span> ${openActions} open actions</p>
+            <h4>${escapeHtml(meeting.title || 'Untitled meeting')}</h4>
+            <p class="entity-meta">Type: ${escapeHtml(getMeetingTypeSourceLabel(meeting))}</p>
+          </div>
+          <div class="entity-history-row-controls">
+            <button class="secondary-button js-open-meeting" type="button" data-meeting-id="${escapeHtml(meeting.id)}" data-return-section="${entityType === 'customer' ? 'customers' : 'partners'}" data-return-key="${escapeHtml(selectedEntity.key)}" data-return-filter="${escapeHtml(selectedFilter)}">Open meeting</button>
+            <button class="secondary-button js-toggle-entity-meeting-expand" type="button" data-entity-type="${escapeHtml(entityType)}" data-entity-key="${escapeHtml(selectedEntity.key)}" data-meeting-id="${escapeHtml(meeting.id)}" aria-expanded="${isExpanded ? 'true' : 'false'}" aria-controls="${escapeHtml(detailsId)}">${isExpanded ? 'Collapse' : 'Expand'}</button>
+          </div>
+          <div id="${escapeHtml(detailsId)}" class="entity-history-expanded" ${isExpanded ? '' : 'hidden'}>
+            <p><strong>Subject:</strong> ${escapeHtml(subjectText)}</p>
+            <p><strong>Participants:</strong> ${escapeHtml(participantsText)}</p>
+            <p><strong>Customer:</strong> ${escapeHtml(customerLabel)}</p>
+            <p><strong>Partner:</strong> ${escapeHtml(partnerLabel)}</p>
+            <p><strong>Summary:</strong> ${escapeHtml(summaryExcerpt)}</p>
+          </div>
+        </article>
+      `;
+    }).join('')
+    : renderEmptyState('No meetings in history', 'This account currently has no visible meeting history.');
+
+  const toggleButton = showToggle
+    ? `<button class="secondary-button js-toggle-entity-meeting-limit" type="button" data-entity-type="${escapeHtml(entityType)}" data-entity-key="${escapeHtml(selectedEntity.key)}">${showAll ? 'Show fewer' : 'Show all meetings'}</button>`
+    : '';
+
+  return `
+    <section class="panel-card">
+      <div class="section-heading">
+        <h3>Meeting History</h3>
+      </div>
+      <div class="entity-history-list">${rows}</div>
+      ${toggleButton ? `<div class="entity-history-toggle">${toggleButton}</div>` : ''}
+    </section>
   `;
 }
 
@@ -5254,51 +5575,11 @@ function renderCustomers() {
       return renderCustomers();
     }
 
-    const partnersLabel = selectedCustomer.relatedNames.length ? selectedCustomer.relatedNames.join(', ') : 'No partners captured';
-    const latestMeetingDate = selectedCustomer.latestMeetingDate ? formatDate(selectedCustomer.latestMeetingDate) : 'Date not available';
-    const historyList = selectedCustomer.meetings.length
-      ? selectedCustomer.meetings.map((meeting) => renderMeetingListItem(meeting, {
-        returnSection: 'customers',
-        returnKey: selectedCustomer.key
-      })).join('')
-      : renderEmptyState('No meetings for this customer', 'This customer appears in saved records but has no visible meeting history yet.');
-
-    return `
-      <section class="panel-card">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">Customer detail</p>
-            <h3>${escapeHtml(selectedCustomer.name)}</h3>
-          </div>
-          <button class="secondary-button js-back-to-customers" type="button">← Return to customers</button>
-        </div>
-        <div class="viewer-meta-grid">
-          <div>
-            <strong>Total meetings</strong>
-            <span>${selectedCustomer.meetings.length}</span>
-          </div>
-          <div>
-            <strong>Latest meeting date</strong>
-            <span>${latestMeetingDate}</span>
-          </div>
-          <div>
-            <strong>Partners involved</strong>
-            <span>${escapeHtml(partnersLabel)}</span>
-          </div>
-          <div>
-            <strong>Open actions</strong>
-            <span>${selectedCustomer.openActions}</span>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel-card">
-        <div class="section-heading">
-          <h3>Meeting History</h3>
-        </div>
-        <div class="meeting-list">${historyList}</div>
-      </section>
-    `;
+    return [
+      renderEntityDetailHeader('customer', selectedCustomer),
+      renderEntityActionsSection('customer', selectedCustomer),
+      renderEntityMeetingHistorySection('customer', selectedCustomer)
+    ].join('');
   }
 
   const list = customerGroups.length
@@ -5335,51 +5616,11 @@ function renderPartners() {
       return renderPartners();
     }
 
-    const customersLabel = selectedPartner.relatedNames.length ? selectedPartner.relatedNames.join(', ') : 'No customers captured';
-    const latestMeetingDate = selectedPartner.latestMeetingDate ? formatDate(selectedPartner.latestMeetingDate) : 'Date not available';
-    const historyList = selectedPartner.meetings.length
-      ? selectedPartner.meetings.map((meeting) => renderMeetingListItem(meeting, {
-        returnSection: 'partners',
-        returnKey: selectedPartner.key
-      })).join('')
-      : renderEmptyState('No meetings for this partner', 'This partner has no visible meeting history yet.');
-
-    return `
-      <section class="panel-card">
-        <div class="section-heading">
-          <div>
-            <p class="eyebrow">Partner detail</p>
-            <h3>${escapeHtml(selectedPartner.name)}</h3>
-          </div>
-          <button class="secondary-button js-back-to-partners" type="button">← Return to partners</button>
-        </div>
-        <div class="viewer-meta-grid">
-          <div>
-            <strong>Total meetings</strong>
-            <span>${selectedPartner.meetings.length}</span>
-          </div>
-          <div>
-            <strong>Latest meeting date</strong>
-            <span>${latestMeetingDate}</span>
-          </div>
-          <div>
-            <strong>Associated customers</strong>
-            <span>${escapeHtml(customersLabel)}</span>
-          </div>
-          <div>
-            <strong>Open actions</strong>
-            <span>${selectedPartner.openActions}</span>
-          </div>
-        </div>
-      </section>
-
-      <section class="panel-card">
-        <div class="section-heading">
-          <h3>Meeting History</h3>
-        </div>
-        <div class="meeting-list">${historyList}</div>
-      </section>
-    `;
+    return [
+      renderEntityDetailHeader('partner', selectedPartner),
+      renderEntityActionsSection('partner', selectedPartner),
+      renderEntityMeetingHistorySection('partner', selectedPartner)
+    ].join('');
   }
 
   const list = partnerGroups.length
@@ -7166,9 +7407,14 @@ function attachInteractions() {
     button.addEventListener('click', () => {
       const returnSection = button.dataset.returnSection;
       const returnKey = button.dataset.returnKey;
+      const returnFilter = button.dataset.returnFilter;
 
       state.meetingReturnContext = returnSection
-        ? { section: returnSection, key: returnKey || null }
+        ? {
+          section: returnSection,
+          key: returnKey || null,
+          filter: ENTITY_DETAIL_ACTION_FILTERS.includes(returnFilter) ? returnFilter : ''
+        }
         : null;
       state.activeSection = 'meetings';
       state.selectedMeetingId = button.dataset.meetingId;
@@ -7242,11 +7488,17 @@ function attachInteractions() {
       if (state.meetingReturnContext && state.meetingReturnContext.section === 'customers') {
         state.activeSection = 'customers';
         state.selectedCustomerKey = state.meetingReturnContext.key;
+        if (state.selectedCustomerKey && state.meetingReturnContext.filter) {
+          setEntityDetailActionFilter('customer', state.selectedCustomerKey, state.meetingReturnContext.filter);
+        }
         state.selectedPartnerKey = null;
         state.selectedParticipantKey = null;
       } else if (state.meetingReturnContext && state.meetingReturnContext.section === 'partners') {
         state.activeSection = 'partners';
         state.selectedPartnerKey = state.meetingReturnContext.key;
+        if (state.selectedPartnerKey && state.meetingReturnContext.filter) {
+          setEntityDetailActionFilter('partner', state.selectedPartnerKey, state.meetingReturnContext.filter);
+        }
         state.selectedCustomerKey = null;
         state.selectedParticipantKey = null;
       } else if (state.meetingReturnContext && state.meetingReturnContext.section === 'participants') {
@@ -7342,24 +7594,81 @@ function attachInteractions() {
   }
 
   document.querySelectorAll('.js-action-status').forEach((field) => {
-    field.addEventListener('change', () => {
+    field.addEventListener('change', async () => {
       const actionId = field.dataset.actionId;
       if (!actionId) {
         return;
       }
 
-      updateActionOverride(actionId, { status: field.value });
+      const currentAction = getActionById(actionId);
+      const previousValue = currentAction && currentAction.status ? currentAction.status : 'Open';
+      const nextValue = field.value;
+      field.disabled = true;
+      const saved = await updateActionOverride(actionId, { status: nextValue });
+      if (!saved) {
+        field.value = previousValue;
+      }
+      field.disabled = false;
     });
   });
 
   document.querySelectorAll('.js-action-due-date').forEach((field) => {
-    field.addEventListener('change', () => {
+    field.addEventListener('change', async () => {
       const actionId = field.dataset.actionId;
       if (!actionId) {
         return;
       }
 
-      updateActionOverride(actionId, { dueDate: field.value });
+      const currentAction = getActionById(actionId);
+      const previousValue = currentAction && currentAction.dueDate ? currentAction.dueDate : '';
+      const nextValue = field.value;
+      field.disabled = true;
+      const saved = await updateActionOverride(actionId, { dueDate: nextValue });
+      if (!saved) {
+        field.value = previousValue;
+      }
+      field.disabled = false;
+    });
+  });
+
+  document.querySelectorAll('.js-entity-action-filter').forEach((button) => {
+    button.addEventListener('click', () => {
+      const entityType = button.dataset.entityType === 'partner' ? 'partner' : 'customer';
+      const entityKey = button.dataset.entityKey || '';
+      const filter = button.dataset.filter || '';
+      if (!entityKey || !ENTITY_DETAIL_ACTION_FILTERS.includes(filter)) {
+        return;
+      }
+
+      setEntityDetailActionFilter(entityType, entityKey, filter);
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-toggle-entity-meeting-limit').forEach((button) => {
+    button.addEventListener('click', () => {
+      const entityType = button.dataset.entityType === 'partner' ? 'partner' : 'customer';
+      const entityKey = button.dataset.entityKey || '';
+      if (!entityKey) {
+        return;
+      }
+
+      setShowAllEntityMeetings(entityType, entityKey, !shouldShowAllEntityMeetings(entityType, entityKey));
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-toggle-entity-meeting-expand').forEach((button) => {
+    button.addEventListener('click', () => {
+      const entityType = button.dataset.entityType === 'partner' ? 'partner' : 'customer';
+      const entityKey = button.dataset.entityKey || '';
+      const meetingId = button.dataset.meetingId || '';
+      if (!entityKey || !meetingId) {
+        return;
+      }
+
+      toggleExpandedEntityMeeting(entityType, entityKey, meetingId);
+      renderViews();
     });
   });
 
