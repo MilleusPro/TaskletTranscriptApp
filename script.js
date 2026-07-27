@@ -2373,7 +2373,8 @@ function buildTranscriptStoragePath(userId, meetingId, originalFileName) {
 }
 
 function getActionOverrideDatabaseId(userId, actionId) {
-  return `action-override-${Math.abs(hashTextStable(`${String(userId || '')}:${String(actionId || '')}`))}`;
+  const scopedKey = `${String(userId || '').trim()}:${String(actionId || '').trim()}`;
+  return `action-override-${hashTextStable(scopedKey)}`;
 }
 
 function mapActionOverrideRowToOverride(row) {
@@ -4980,7 +4981,7 @@ async function updateSingleApplicationSetting(settingKey, nextValue) {
   };
 }
 
-async function updateActionOverride(actionId, update) {
+async function updateActionOverride(actionId, update, options = {}) {
   if (!actionId) {
     return false;
   }
@@ -4992,7 +4993,8 @@ async function updateActionOverride(actionId, update) {
   }
 
   const sourceAction = getActionById(actionId);
-  if (!sourceAction || !sourceAction.sourceMeetingId) {
+  const sourceMeetingId = String(options.sourceMeetingId || (sourceAction ? sourceAction.sourceMeetingId : '') || '').trim();
+  if (!sourceMeetingId) {
     state.actionOverridesError = 'The selected action could not be matched to a cloud meeting.';
     renderViews();
     return false;
@@ -5024,8 +5026,8 @@ async function updateActionOverride(actionId, update) {
     const { error } = await supabaseClient
       .from('action_overrides')
       .delete()
-      .eq('id', getActionOverrideDatabaseId(authState.user.id, actionId))
-      .eq('user_id', authState.user.id);
+      .eq('user_id', authState.user.id)
+      .eq('action_id', actionId);
 
     if (error) {
       state.actionOverridesError = 'Unable to save action updates to Supabase right now.';
@@ -5040,11 +5042,44 @@ async function updateActionOverride(actionId, update) {
     return true;
   }
 
-  const row = mapActionOverrideToDatabaseRow(nextOverride, authState.user.id, sourceAction.sourceMeetingId);
+  const row = mapActionOverrideToDatabaseRow(nextOverride, authState.user.id, sourceMeetingId);
   if (!row) {
     state.actionOverridesError = 'The action update was invalid and could not be saved.';
     renderViews();
     return false;
+  }
+
+  const { data: existingRows, error: existingRowsError } = await supabaseClient
+    .from('action_overrides')
+    .select('id')
+    .eq('user_id', authState.user.id)
+    .eq('action_id', actionId);
+
+  if (existingRowsError) {
+    state.actionOverridesError = 'Unable to save action updates to Supabase right now.';
+    renderViews();
+    return false;
+  }
+
+  const legacyRowIds = Array.isArray(existingRows)
+    ? existingRows
+      .map((record) => String((record && record.id) || '').trim())
+      .filter((id) => id && id !== row.id)
+    : [];
+
+  if (legacyRowIds.length) {
+    const { error: legacyDeleteError } = await supabaseClient
+      .from('action_overrides')
+      .delete()
+      .eq('user_id', authState.user.id)
+      .eq('action_id', actionId)
+      .in('id', legacyRowIds);
+
+    if (legacyDeleteError) {
+      state.actionOverridesError = 'Unable to save action updates to Supabase right now.';
+      renderViews();
+      return false;
+    }
   }
 
   const { data, error } = await supabaseClient
@@ -8395,10 +8430,11 @@ function attachInteractions() {
       }
 
       const currentAction = getActionById(actionId);
+      const sourceMeetingId = currentAction && currentAction.sourceMeetingId ? currentAction.sourceMeetingId : '';
       const previousValue = currentAction && currentAction.status ? currentAction.status : 'Open';
       const nextValue = field.value;
       field.disabled = true;
-      const saved = await updateActionOverride(actionId, { status: nextValue });
+      const saved = await updateActionOverride(actionId, { status: nextValue }, { sourceMeetingId });
       if (!saved) {
         field.value = previousValue;
       }
@@ -8432,10 +8468,11 @@ function attachInteractions() {
       }
 
       const currentAction = getActionById(actionId);
+      const sourceMeetingId = currentAction && currentAction.sourceMeetingId ? currentAction.sourceMeetingId : '';
       const previousValue = currentAction && currentAction.dueDate ? currentAction.dueDate : '';
       const nextValue = field.value;
       field.disabled = true;
-      const saved = await updateActionOverride(actionId, { dueDate: nextValue });
+      const saved = await updateActionOverride(actionId, { dueDate: nextValue }, { sourceMeetingId });
       if (!saved) {
         field.value = previousValue;
       }
