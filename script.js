@@ -44,6 +44,16 @@ const MEETING_REVIEW_STATUS_LABELS = {
   reviewed: 'Reviewed',
   needs_correction: 'Needs correction'
 };
+const MEETING_TYPE_FILTER_ALL_VALUE = 'all';
+const MEETING_TYPE_OPTIONS = Object.freeze([
+  { value: 'partner_status', label: 'Partner Status' },
+  { value: 'customer_discovery', label: 'Customer Discovery' },
+  { value: 'demo', label: 'Demo' },
+  { value: 'seminar', label: 'Seminar' },
+  { value: 'implementation_follow_up', label: 'Implementation Follow-up' },
+  { value: 'internal', label: 'Internal' },
+  { value: 'other', label: 'Other' }
+]);
 const SEARCH_MIN_CHARS = 2;
 const SEARCH_DEBOUNCE_MS = 180;
 const AUTH_ERROR_MESSAGE = 'Unable to sign in. Check your email and password and try again.';
@@ -67,6 +77,7 @@ const MEETING_ROW_COLUMNS = [
   'meeting_date',
   'start_time',
   'duration',
+  'meeting_type',
   'customer',
   'partner',
   'participants',
@@ -872,6 +883,7 @@ function createEmptyImportReview() {
     dateText: '',
     startTime: '',
     duration: '',
+    meetingType: 'other',
     customer: '',
     partner: '',
     participants: '',
@@ -1128,6 +1140,7 @@ const metadataLabelMap = {
   'date': 'date',
   'start time': 'startTime',
   'duration': 'duration',
+  'meeting type': 'meetingType',
   'main participants': 'participants',
   'participants': 'participants',
   'purpose': 'subject',
@@ -1405,6 +1418,7 @@ function parseTranscriptMetadata(extractedText, extractedHtml) {
     'date': 'date',
     'start time': 'startTime',
     'duration': 'duration',
+    'meeting type': 'meetingType',
     'customer': 'customer',
     'partner': 'partner',
     'participants': 'participants',
@@ -1581,7 +1595,9 @@ function applyExtractedMetadataToReview(extractedText, extractedHtml) {
 
   Object.entries(parsedMetadata).forEach(([fieldName, value]) => {
     if (value && !state.importReview[fieldName]) {
-      state.importReview[fieldName] = value;
+      state.importReview[fieldName] = fieldName === 'meetingType'
+        ? normalizeMeetingTypeValue(value)
+        : value;
       hasChanged = true;
     }
   });
@@ -1919,6 +1935,7 @@ function sanitizeAiCleanupResult(responsePayload) {
     date: normalizeExtractedDate(result.date || ''),
     startTime: sanitizePlainText(result.startTime || '', 80),
     duration: sanitizePlainText(result.duration || '', 120),
+    meetingType: normalizeMeetingTypeValue(result.meetingType || result.meeting_type || ''),
     customer: sanitizePlainText(result.customer || '', 160),
     partner: sanitizePlainText(result.partner || '', 160),
     subject: sanitizePlainText(result.subject || '', 2000),
@@ -1996,6 +2013,7 @@ function applyAiCleanupResultToImportReview(sanitizedResult) {
     dateText: aiData.date,
     startTime: aiData.startTime,
     duration: aiData.duration,
+    meetingType: normalizeMeetingTypeValue(aiData.meetingType || ''),
     customer: aiData.customer,
     partner: aiData.partner,
     participants: aiData.participants.map(participantRecordToDisplayLabel).filter(Boolean).join(', '),
@@ -2306,6 +2324,7 @@ function normalizeMeetingRecord(meeting) {
   normalizedMeeting.originalFileName = String(meeting.originalFileName || '').trim();
   normalizedMeeting.originalFileMimeType = String(meeting.originalFileMimeType || '').trim();
   normalizedMeeting.transcriptHash = sanitizeTranscriptHashValue(meeting.transcriptHash || meeting.transcript_hash);
+  normalizedMeeting.meetingType = normalizeMeetingTypeValue(meeting.meetingType || meeting.meeting_type);
   normalizedMeeting.sourceType = Object.values(IMPORT_MODES).includes(String(meeting.sourceType || '').trim())
     ? String(meeting.sourceType || '').trim()
     : '';
@@ -2455,6 +2474,7 @@ function mapMeetingToDatabaseRow(meeting, authenticatedUserId) {
     meeting_date: normalizeExtractedDate(normalizedMeeting.date || ''),
     start_time: String(normalizedMeeting.startTime || '').trim(),
     duration: String(normalizedMeeting.duration || '').trim(),
+    meeting_type: normalizeMeetingTypeValue(normalizedMeeting.meetingType),
     customer: String(normalizedMeeting.customer || '').trim(),
     partner: String(normalizedMeeting.partner || '').trim(),
     participants: normalizeMeetingParticipants(normalizedMeeting.participants),
@@ -2505,7 +2525,7 @@ function mapDatabaseRowToMeeting(row) {
     startTime: String(row.start_time || '').trim(),
     duration: String(row.duration || '').trim(),
     durationMinutes: 0,
-    meetingType: 'Imported',
+    meetingType: normalizeMeetingTypeValue(row.meeting_type),
     customerId: null,
     partnerId: null,
     participantIds: [],
@@ -2822,6 +2842,7 @@ const state = {
   actionOverrides: {},
   activeViewerTab: 'overview',
   sortOrder: 'newest',
+  meetingsMeetingTypeFilter: MEETING_TYPE_FILTER_ALL_VALUE,
   searchQuery: '',
   searchDebounceHandle: null,
   searchResultsOpen: false,
@@ -2870,6 +2891,8 @@ const state = {
   dataManagementSelectedBackupName: '',
   meetingReviewStatusSaving: false,
   meetingReviewStatusError: '',
+  meetingTypeUpdateInProgress: false,
+  meetingTypeUpdateError: '',
   meetingDocumentDownloadInProgressId: '',
   meetingDocumentDownloadError: '',
   meetingDeletionWarning: ''
@@ -2889,6 +2912,44 @@ function getDateMonthsAgoString(monthCount) {
 
 function getDefaultPartnerStatusBriefStartDate() {
   return getDateMonthsAgoString(6);
+}
+
+function getDateDaysAfterDateString(dateValue, dayCount = 1) {
+  const normalizedDate = normalizeExtractedDate(dateValue || '');
+  if (!normalizedDate) {
+    return '';
+  }
+
+  const normalizedCount = Number.isFinite(Number(dayCount)) ? Math.trunc(Number(dayCount)) : 1;
+  const targetDate = new Date(`${normalizedDate}T00:00:00`);
+  if (!Number.isFinite(targetDate.getTime())) {
+    return '';
+  }
+
+  targetDate.setDate(targetDate.getDate() + normalizedCount);
+  const year = targetDate.getFullYear();
+  const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+  const day = String(targetDate.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getLatestPartnerStatusMeetingDate(partnerMeetings) {
+  const meetings = Array.isArray(partnerMeetings) ? partnerMeetings : [];
+  const latestPartnerStatusMeeting = meetings.find((meeting) => (
+    normalizeMeetingTypeValue(meeting && meeting.meetingType) === 'partner_status'
+    && normalizeExtractedDate(meeting && meeting.date)
+  ));
+
+  return latestPartnerStatusMeeting ? normalizeExtractedDate(latestPartnerStatusMeeting.date) : '';
+}
+
+function getPartnerStatusBriefStartDateForPartner(selectedPartner) {
+  const partnerMeetings = Array.isArray(selectedPartner && selectedPartner.meetings)
+    ? [...selectedPartner.meetings].sort(compareMeetingsNewestFirst)
+    : [];
+  const latestPartnerStatusMeetingDate = getLatestPartnerStatusMeetingDate(partnerMeetings);
+  const nextDayAfterLatestStatus = getDateDaysAfterDateString(latestPartnerStatusMeetingDate, 1);
+  return nextDayAfterLatestStatus || getDefaultPartnerStatusBriefStartDate();
 }
 
 function getValidPartnerBriefStartDate(value) {
@@ -3010,6 +3071,7 @@ function buildPartnerStatusBrief(selectedPartner, startDateValue) {
   const partnerMeetings = Array.isArray(selectedPartner && selectedPartner.meetings)
     ? [...selectedPartner.meetings].sort(compareMeetingsNewestFirst)
     : [];
+  const latestPartnerStatusMeetingDate = getLatestPartnerStatusMeetingDate(partnerMeetings);
   const partnerMeetingIds = new Set(partnerMeetings.map((meeting) => meeting && meeting.id).filter(Boolean));
   const meetingsInPeriod = partnerMeetings.filter((meeting) => isMeetingInsideDateRange(meeting, startDate, today));
   const groupedActions = getCombinedActions().filter((action) => action && partnerMeetingIds.has(action.sourceMeetingId));
@@ -3223,6 +3285,7 @@ function buildPartnerStatusBrief(selectedPartner, startDateValue) {
     endDate: today,
     generatedAt: today,
     latestMeetingDate,
+    latestPartnerStatusMeetingDate,
     meetingsInPeriod,
     keyContacts: getPartnerBriefKeyContacts(partnerMeetings),
     customerCases,
@@ -3372,6 +3435,7 @@ function renderPartnerStatusBrief(selectedPartner) {
         <div>
           <p class="eyebrow">Partner status preparation</p>
           <h3>${escapeHtml(brief.partnerName || selectedPartner.name || 'Partner')}</h3>
+          <p class="entity-meta"><strong>Previous partner status meeting:</strong> ${escapeHtml(brief.latestPartnerStatusMeetingDate ? formatDate(brief.latestPartnerStatusMeetingDate) : 'None recorded')}</p>
         </div>
         <div class="sort-controls partner-brief-controls">
           <label class="sort-label" for="partner-brief-start-date">Start date</label>
@@ -3394,6 +3458,10 @@ function renderPartnerStatusBrief(selectedPartner) {
           </div>
           ${brief.keyContacts.length ? `<div><strong>Known partner contacts/participants</strong><span>${escapeHtml(brief.keyContacts.map((contact) => (contact.company ? `${contact.name} (${contact.company})` : contact.name)).join(', '))}</span></div>` : ''}
           ${brief.latestMeetingDate ? `<div><strong>Latest recorded meeting</strong><span>${escapeHtml(formatDate(brief.latestMeetingDate))}</span></div>` : ''}
+          <div>
+            <strong>Previous partner status meeting</strong>
+            <span>${escapeHtml(brief.latestPartnerStatusMeetingDate ? formatDate(brief.latestPartnerStatusMeetingDate) : 'None recorded')}</span>
+          </div>
           <div>
             <strong>Meetings in selected period</strong>
             <span>${brief.meetingsInPeriod.length}</span>
@@ -3555,6 +3623,48 @@ function normalizeActionResponsibilityValue(value) {
   return ['tasklet', 'partner', 'customer', 'unassigned'].includes(normalized)
     ? normalized
     : null;
+}
+
+function normalizeMeetingTypeValue(value) {
+  const normalized = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_')
+    .replace(/[^a-z_]/g, '');
+  const matchingOption = MEETING_TYPE_OPTIONS.find((meetingTypeOption) => meetingTypeOption.value === normalized);
+  return matchingOption ? matchingOption.value : 'other';
+}
+
+function getMeetingTypeLabel(value) {
+  const normalized = normalizeMeetingTypeValue(value);
+  const matchingOption = MEETING_TYPE_OPTIONS.find((meetingTypeOption) => meetingTypeOption.value === normalized);
+  return matchingOption ? matchingOption.label : 'Other';
+}
+
+function getMeetingTypeBadgeClassName(value) {
+  const normalized = normalizeMeetingTypeValue(value).replace(/_/g, '-');
+  return `meeting-type-badge meeting-type-badge--${normalized}`;
+}
+
+function renderMeetingTypeBadge(value) {
+  const normalized = normalizeMeetingTypeValue(value);
+  return `<span class="badge ${getMeetingTypeBadgeClassName(normalized)}">${escapeHtml(getMeetingTypeLabel(normalized))}</span>`;
+}
+
+function getMeetingTypeOptionsMarkup(selectedValue, includeAllOption = false) {
+  const normalizedSelectedValue = includeAllOption && String(selectedValue || '').trim() === MEETING_TYPE_FILTER_ALL_VALUE
+    ? MEETING_TYPE_FILTER_ALL_VALUE
+    : normalizeMeetingTypeValue(selectedValue);
+
+  const allOptionMarkup = includeAllOption
+    ? `<option value="${MEETING_TYPE_FILTER_ALL_VALUE}" ${normalizedSelectedValue === MEETING_TYPE_FILTER_ALL_VALUE ? 'selected' : ''}>All meeting types</option>`
+    : '';
+
+  const typeOptionsMarkup = MEETING_TYPE_OPTIONS
+    .map((meetingTypeOption) => `<option value="${meetingTypeOption.value}" ${meetingTypeOption.value === normalizedSelectedValue ? 'selected' : ''}>${escapeHtml(meetingTypeOption.label)}</option>`)
+    .join('');
+
+  return `${allOptionMarkup}${typeOptionsMarkup}`;
 }
 
 function normalizeMeetingReviewStatus(value) {
@@ -4023,7 +4133,7 @@ function openSearchResult(result) {
     state.activeSection = 'partners';
     state.selectedPartnerKey = result.id;
     state.partnerStatusBriefOpen = false;
-    state.partnerStatusBriefStartDate = getDefaultPartnerStatusBriefStartDate();
+    state.partnerStatusBriefStartDate = getPartnerStatusBriefStartDateForPartner(getPartnerGroupByKey(result.id));
     state.selectedCustomerKey = null;
     state.selectedParticipantKey = null;
     state.meetingEditMode = false;
@@ -4333,7 +4443,16 @@ function renderViews() {
 
 function getVisibleMeetings() {
   const query = normalizeSearchQuery(state.searchQuery);
-  const meetings = getAllMeetings().sort((a, b) => {
+  const normalizedTypeFilter = state.meetingsMeetingTypeFilter === MEETING_TYPE_FILTER_ALL_VALUE
+    ? MEETING_TYPE_FILTER_ALL_VALUE
+    : normalizeMeetingTypeValue(state.meetingsMeetingTypeFilter);
+  const meetings = getAllMeetings().filter((meeting) => {
+    if (normalizedTypeFilter === MEETING_TYPE_FILTER_ALL_VALUE) {
+      return true;
+    }
+
+    return normalizeMeetingTypeValue(meeting.meetingType) === normalizedTypeFilter;
+  }).sort((a, b) => {
     const order = state.sortOrder === 'oldest' ? 1 : -1;
     const dateA = new Date(a.date || a.createdAt || '1970-01-01').getTime();
     const dateB = new Date(b.date || b.createdAt || '1970-01-01').getTime();
@@ -5121,6 +5240,7 @@ function buildImportDuplicateCandidate(values) {
   const normalizedCustomer = normalizeEntityNameForDuplicateDetection(values.customer || '');
   const normalizedPartner = normalizeEntityNameForDuplicateDetection(values.partner || '');
   const normalizedDate = normalizeExtractedDate(values.date || '');
+  const normalizedMeetingType = normalizeMeetingTypeValue(values.meetingType || 'other');
   const normalizedParticipants = getNormalizedParticipantsForDuplicateDetection(values.participants || []);
   const transcriptHash = getTranscriptHashForDuplicateDetection(values.transcriptText || '');
   const normalizedFileName = normalizeOriginalFileNameForDuplicateDetection(values.originalFileName || '');
@@ -5135,6 +5255,7 @@ function buildImportDuplicateCandidate(values) {
     normalizedCustomer,
     partner: String(values.partner || '').trim(),
     normalizedPartner,
+    meetingType: normalizedMeetingType,
     participants: normalizedParticipants,
     transcriptHash,
     originalFileName: String(values.originalFileName || '').trim(),
@@ -5154,6 +5275,7 @@ function getImportDuplicateCandidateSignature(candidate) {
     String(candidate && candidate.normalizedTitle ? candidate.normalizedTitle : ''),
     String(candidate && candidate.normalizedCustomer ? candidate.normalizedCustomer : ''),
     String(candidate && candidate.normalizedPartner ? candidate.normalizedPartner : ''),
+    String(candidate && candidate.meetingType ? candidate.meetingType : ''),
     participantSignature,
     String(candidate && candidate.transcriptHash ? candidate.transcriptHash : ''),
     String(candidate && candidate.normalizedFileName ? candidate.normalizedFileName : ''),
@@ -5457,6 +5579,7 @@ function continueImportSaveAfterDuplicateWarning() {
   const duplicateCandidate = buildImportDuplicateCandidate({
     title: state.importReview.meetingTitle,
     date: reviewedDate,
+    meetingType: state.importReview.meetingType,
     customer: state.importReview.customer,
     partner: state.importReview.partner,
     participants: state.importReview.participants,
@@ -6993,6 +7116,59 @@ async function updateMeetingReviewStatus(meetingId, nextStatus) {
   return true;
 }
 
+async function updateMeetingTypeForSelectedMeeting(nextMeetingType) {
+  const meetingId = state.selectedMeetingId;
+  const meetingIndex = getSavedMeetingIndex(meetingId);
+  if (meetingIndex < 0) {
+    state.meetingTypeUpdateError = 'Only meetings loaded for this account can be updated.';
+    renderViews();
+    return false;
+  }
+
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.meetingTypeUpdateError = 'You must be signed in to update meeting type.';
+    renderViews();
+    return false;
+  }
+
+  const normalizedMeetingType = normalizeMeetingTypeValue(nextMeetingType);
+  const existingMeeting = state.savedMeetings[meetingIndex];
+  if (normalizeMeetingTypeValue(existingMeeting.meetingType) === normalizedMeetingType) {
+    state.meetingTypeUpdateError = '';
+    return true;
+  }
+
+  state.meetingTypeUpdateInProgress = true;
+  state.meetingTypeUpdateError = '';
+  renderViews();
+
+  const { data, error } = await supabaseClient
+    .from('meetings')
+    .update({
+      meeting_type: normalizedMeetingType,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', meetingId)
+    .eq('user_id', authState.user.id)
+    .select(MEETING_ROW_COLUMNS)
+    .single();
+
+  state.meetingTypeUpdateInProgress = false;
+
+  if (error || !data) {
+    state.meetingTypeUpdateError = 'Unable to save meeting type right now.';
+    renderViews();
+    return false;
+  }
+
+  const updatedMeetings = [...state.savedMeetings];
+  updatedMeetings[meetingIndex] = mapDatabaseRowToMeeting(data);
+  state.savedMeetings = updatedMeetings.sort(compareMeetingsNewestFirst);
+  state.meetingTypeUpdateError = '';
+  renderViews();
+  return true;
+}
+
 function isActionDueToday(action) {
   return Boolean(action && action.dueDate && action.dueDate === getTodayDateString() && !isActionClosed(action));
 }
@@ -7206,7 +7382,6 @@ function renderReviewQueueMeetingCard(meeting, selectedFilter) {
   const warnings = getMeetingReviewWarnings(meeting);
   const warningCount = warnings.length;
   const previewWarnings = warnings.slice(0, 3);
-  const sourceLabel = getMeetingTypeSourceLabel(meeting);
   const dateLabel = meeting.date ? formatDate(meeting.date) : 'Date not available';
   return `
     <article class="review-queue-card">
@@ -7217,7 +7392,7 @@ function renderReviewQueueMeetingCard(meeting, selectedFilter) {
         </div>
         <div class="review-queue-card-badges">
           ${renderMeetingReviewStatusBadge(meeting.reviewStatus)}
-          <span class="meeting-status ${sourceLabel === 'Imported' ? 'completed' : ''}">${escapeHtml(sourceLabel)}</span>
+          ${renderMeetingTypeBadge(meeting.meetingType)}
         </div>
       </div>
       <div class="meeting-table-details review-queue-card-details">
@@ -7341,12 +7516,19 @@ function renderDashboard(meetings) {
 
 function renderMeetingsPage() {
   const meetings = getVisibleMeetings();
+  const hasMeetingTypeFilter = state.meetingsMeetingTypeFilter !== MEETING_TYPE_FILTER_ALL_VALUE;
   const deletionWarning = state.meetingDeletionWarning
     ? `<p class="import-error" role="status">${escapeHtml(state.meetingDeletionWarning)}</p>`
     : '';
   const list = meetings.length
     ? meetings.map((meeting) => renderMeetingListItem(meeting)).join('')
-    : renderEmptyState('No meetings found', 'Adjust your search terms or import a transcript.', 'Go to Import Transcript');
+    : renderEmptyState(
+      'No meetings found',
+      hasMeetingTypeFilter
+        ? 'No meetings match the selected meeting type. Change the meeting type filter or import a transcript.'
+        : 'Adjust your search terms or import a transcript.',
+      'Go to Import Transcript'
+    );
 
   return `
     <section class="panel-card">
@@ -7356,6 +7538,10 @@ function renderMeetingsPage() {
           <h3>All meetings</h3>
         </div>
         <div class="sort-controls">
+          <label class="sort-label" for="meeting-type-filter">Meeting type</label>
+          <select id="meeting-type-filter" class="sort-select js-meeting-type-filter">
+            ${getMeetingTypeOptionsMarkup(state.meetingsMeetingTypeFilter, true)}
+          </select>
           <label class="sort-label" for="meeting-sort-order">Sort</label>
           <select id="meeting-sort-order" class="sort-select">
             <option value="newest">Newest first</option>
@@ -7388,7 +7574,7 @@ function renderMeetingListItem(meeting, options = {}) {
         </div>
         <div class="meeting-card-badges">
           ${reviewStatusBadge}
-          <span class="meeting-status ${meeting.meetingType === 'Demo' ? '' : 'completed'}">${escapeHtml(meeting.meetingType || 'Imported')}</span>
+          ${renderMeetingTypeBadge(meeting.meetingType)}
         </div>
       </div>
       <div class="meeting-table-details">
@@ -7407,16 +7593,7 @@ function getEntityActionsForMeetings(meetings) {
 }
 
 function getMeetingTypeSourceLabel(meeting) {
-  const meetingType = String(meeting && meeting.meetingType ? meeting.meetingType : '').trim();
-  if (meetingType) {
-    return meetingType;
-  }
-
-  if (meeting && meeting.sourceType === IMPORT_MODES.RAW_TEAMS_AI) {
-    return 'AI cleaned';
-  }
-
-  return 'Imported';
+  return getMeetingTypeLabel(meeting && meeting.meetingType ? meeting.meetingType : 'other');
 }
 
 function getMeetingSummaryExcerpt(meeting) {
@@ -7589,6 +7766,7 @@ function renderMeetingDetailViewer(meeting) {
   const attendeeNames = getMeetingDisplayParticipants(meeting);
   const customer = getMeetingDisplayCustomer(meeting);
   const partner = getMeetingDisplayPartner(meeting);
+  const meetingType = normalizeMeetingTypeValue(meeting.meetingType);
   const openActions = getMeetingOpenActionCount(meeting);
   const canEdit = isSavedMeetingEditable(meeting.id);
   const reviewStatus = normalizeMeetingReviewStatus(meeting.reviewStatus);
@@ -7615,6 +7793,9 @@ function renderMeetingDetailViewer(meeting) {
   const reviewStatusFeedback = state.meetingReviewStatusError
     ? `<p class="import-error" role="alert">${escapeHtml(state.meetingReviewStatusError)}</p>`
     : (state.meetingReviewStatusSaving ? '<p class="entity-meta" role="status">Saving review status...</p>' : '');
+  const meetingTypeFeedback = state.meetingTypeUpdateError
+    ? `<p class="import-error" role="alert">${escapeHtml(state.meetingTypeUpdateError)}</p>`
+    : (state.meetingTypeUpdateInProgress ? '<p class="entity-meta" role="status">Saving meeting type...</p>' : '');
   const reviewChecksMarkup = reviewWarnings.length
     ? `<ul class="viewer-list">${reviewWarnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul>`
     : '<p class="meeting-review-checks-clear">No review warnings detected.</p>';
@@ -7659,7 +7840,19 @@ function renderMeetingDetailViewer(meeting) {
           <strong>Open actions</strong>
           <span>${openActions}</span>
         </div>
+        <div class="meeting-type-meta-cell">
+          <strong>Meeting type</strong>
+          <span>${renderMeetingTypeBadge(meetingType)}</span>
+          ${canEdit ? `
+            <label class="sr-only" for="meeting-type-select">Change meeting type</label>
+            <select id="meeting-type-select" class="sort-select meeting-type-edit-select js-meeting-type-select" ${state.meetingTypeUpdateInProgress ? 'disabled' : ''}>
+              ${getMeetingTypeOptionsMarkup(meetingType, false)}
+            </select>
+          ` : ''}
+        </div>
       </div>
+
+      ${meetingTypeFeedback}
 
       <section class="panel-card meeting-review-panel">
         <div class="meeting-review-panel-header">
@@ -9291,6 +9484,12 @@ function renderImport() {
           <input class="import-field js-import-review-field" type="text" value="${escapeHtml(state.importReview.duration)}" data-review-field="duration" placeholder="Duration">
         </label>
         <label class="import-field-group">
+          <span>Meeting type</span>
+          <select class="import-field js-import-review-field" data-review-field="meetingType">
+            ${getMeetingTypeOptionsMarkup(state.importReview.meetingType, false)}
+          </select>
+        </label>
+        <label class="import-field-group">
           <span>Customer</span>
           <input class="import-field js-import-review-field" type="text" value="${escapeHtml(state.importReview.customer)}" data-review-field="customer" placeholder="Customer">
         </label>
@@ -9409,7 +9608,7 @@ function renderMeetingCard(meeting) {
   const partner = getPartnerById(meeting.partnerId);
   const participantIds = Array.isArray(meeting.participantIds) ? meeting.participantIds : [];
   const participantNames = participantIds.map((id) => getParticipantById(id)).filter(Boolean).map((participant) => participant.name).join(', ');
-  const statusClass = 'meeting-status completed';
+  const sourceLabel = getMeetingTypeSourceLabel(meeting);
 
   return `
     <article class="meeting-card">
@@ -9422,11 +9621,11 @@ function renderMeetingCard(meeting) {
           <h4>${escapeHtml(meeting.title || 'Untitled meeting')}</h4>
           <p class="meeting-meta">${formatDate(meeting.date)} · ${meeting.durationMinutes} minutes · ${participantIds.length} participants</p>
         </div>
-        <span class="${statusClass}">${escapeHtml(meeting.meetingType || 'Saved')}</span>
+        ${renderMeetingTypeBadge(meeting.meetingType)}
       </div>
       <p class="meeting-summary">${escapeHtml((Array.isArray(meeting.summary) && meeting.summary[0]) ? meeting.summary[0] : '')}</p>
       <div class="entity-meta">
-        <span class="badge">${escapeHtml(meeting.meetingType || 'Imported')}</span>
+        <span class="meeting-status completed">${escapeHtml(sourceLabel)}</span>
         <span>Participants: ${escapeHtml(participantNames)}</span>
       </div>
       <button class="secondary-button meeting-card-action js-open-meeting" type="button" data-meeting-id="${meeting.id}">Open details</button>
@@ -9588,6 +9787,7 @@ async function handleSaveMeeting(options = {}) {
   const date = state.importReview.date.trim();
   const startTime = state.importReview.startTime.trim();
   const duration = state.importReview.duration.trim();
+  const meetingType = normalizeMeetingTypeValue(state.importReview.meetingType);
   const subject = state.importReview.subject.trim();
   const customer = state.importReview.customer.trim();
   const partner = state.importReview.partner.trim();
@@ -9610,6 +9810,7 @@ async function handleSaveMeeting(options = {}) {
   const duplicateCandidate = buildImportDuplicateCandidate({
     title,
     date: normalizedMeetingDate,
+    meetingType,
     customer,
     partner,
     participants,
@@ -9675,7 +9876,7 @@ async function handleSaveMeeting(options = {}) {
     startTime,
     duration,
     durationMinutes: 0,
-    meetingType: 'Imported',
+    meetingType,
     customerId: null,
     partnerId: null,
     participantIds: [],
@@ -10098,10 +10299,11 @@ function attachInteractions() {
 
   document.querySelectorAll('.js-open-partner-detail').forEach((button) => {
     button.addEventListener('click', () => {
+      const selectedPartnerKey = button.dataset.partnerKey || null;
       state.activeSection = 'partners';
-      state.selectedPartnerKey = button.dataset.partnerKey || null;
+      state.selectedPartnerKey = selectedPartnerKey;
       state.partnerStatusBriefOpen = false;
-      state.partnerStatusBriefStartDate = getDefaultPartnerStatusBriefStartDate();
+      state.partnerStatusBriefStartDate = getPartnerStatusBriefStartDateForPartner(getPartnerGroupByKey(selectedPartnerKey));
       state.selectedCustomerKey = null;
       state.selectedParticipantKey = null;
       state.selectedMeetingId = null;
@@ -10148,6 +10350,8 @@ function attachInteractions() {
       state.meetingEditError = '';
       state.meetingReviewStatusError = '';
       state.meetingReviewStatusSaving = false;
+      state.meetingTypeUpdateError = '';
+      state.meetingTypeUpdateInProgress = false;
       state.meetingDocumentDownloadInProgressId = '';
       state.meetingDocumentDownloadError = '';
       state.activeViewerTab = 'overview';
@@ -10259,6 +10463,8 @@ function attachInteractions() {
       state.meetingEditError = '';
       state.meetingReviewStatusError = '';
       state.meetingReviewStatusSaving = false;
+      state.meetingTypeUpdateError = '';
+      state.meetingTypeUpdateInProgress = false;
       state.meetingReturnContext = null;
       state.meetingDocumentDownloadInProgressId = '';
       state.meetingDocumentDownloadError = '';
@@ -10291,6 +10497,31 @@ function attachInteractions() {
       await updateMeetingReviewStatus(state.selectedMeetingId, nextStatus);
     });
   });
+
+  const meetingTypeSelect = document.querySelector('.js-meeting-type-select');
+  if (meetingTypeSelect) {
+    meetingTypeSelect.addEventListener('change', async (event) => {
+      if (!state.selectedMeetingId || state.meetingTypeUpdateInProgress) {
+        return;
+      }
+
+      const selectedMeeting = getMeetingById(state.selectedMeetingId);
+      const previousMeetingType = normalizeMeetingTypeValue(selectedMeeting && selectedMeeting.meetingType);
+      const nextMeetingType = normalizeMeetingTypeValue(event.target.value);
+
+      if (previousMeetingType === nextMeetingType) {
+        event.target.value = nextMeetingType;
+        return;
+      }
+
+      event.target.disabled = true;
+      const saved = await updateMeetingTypeForSelectedMeeting(nextMeetingType);
+      if (!saved) {
+        event.target.value = previousMeetingType;
+      }
+      event.target.disabled = false;
+    });
+  }
 
   document.querySelectorAll('.js-search-result').forEach((button) => {
     button.addEventListener('click', () => {
@@ -10326,7 +10557,8 @@ function attachInteractions() {
 
   document.querySelectorAll('.js-open-partner-status-brief').forEach((button) => {
     button.addEventListener('click', () => {
-      state.partnerStatusBriefStartDate = getValidPartnerBriefStartDate(state.partnerStatusBriefStartDate);
+      const selectedPartner = getPartnerGroupByKey(state.selectedPartnerKey);
+      state.partnerStatusBriefStartDate = getPartnerStatusBriefStartDateForPartner(selectedPartner);
       openPartnerStatusBrief();
     });
   });
@@ -10628,6 +10860,8 @@ function attachInteractions() {
         if (reviewField === 'date') {
           state.importReview.date = normalizeExtractedDate(field.value);
           state.importReview.dateText = field.value;
+        } else if (reviewField === 'meetingType') {
+          state.importReview.meetingType = normalizeMeetingTypeValue(field.value);
         } else {
           state.importReview[reviewField] = field.value;
         }
@@ -10783,6 +11017,18 @@ function attachInteractions() {
         event.target.value = previousSortOrder;
         window.alert(saveResult.error);
       }
+      renderViews();
+    });
+  }
+
+  const meetingTypeFilterSelect = document.querySelector('.js-meeting-type-filter');
+  if (meetingTypeFilterSelect) {
+    meetingTypeFilterSelect.value = state.meetingsMeetingTypeFilter;
+    meetingTypeFilterSelect.addEventListener('change', (event) => {
+      const selectedValue = String(event.target.value || '').trim();
+      state.meetingsMeetingTypeFilter = selectedValue === MEETING_TYPE_FILTER_ALL_VALUE
+        ? MEETING_TYPE_FILTER_ALL_VALUE
+        : normalizeMeetingTypeValue(selectedValue);
       renderViews();
     });
   }

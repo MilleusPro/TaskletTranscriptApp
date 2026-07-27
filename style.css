@@ -922,6 +922,58 @@ textarea:disabled {
   gap: var(--space-2);
 }
 
+.meeting-type-meta-cell {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.meeting-type-edit-select {
+  max-width: none;
+}
+
+.meeting-type-badge--partner-status {
+  background: #e8f2ff;
+  border-color: #c6dbf7;
+  color: #1f4e7a;
+}
+
+.meeting-type-badge--customer-discovery {
+  background: #fff7df;
+  border-color: #f0deb0;
+  color: #6f5218;
+}
+
+.meeting-type-badge--demo {
+  background: #eefcf2;
+  border-color: #ccebd6;
+  color: #1f6440;
+}
+
+.meeting-type-badge--seminar {
+  background: #f5efff;
+  border-color: #ded1f8;
+  color: #544078;
+}
+
+.meeting-type-badge--implementation-follow-up {
+  background: #e7f7f7;
+  border-color: #cae6e6;
+  color: #1f6767;
+}
+
+.meeting-type-badge--internal {
+  background: #f1f3f8;
+  border-color: #d7ddea;
+  color: #334761;
+}
+
+.meeting-type-badge--other {
+  background: #f6f6f6;
+  border-color: #e1e1e1;
+  color: #4d5968;
+}
+
 .dashboard-review-panel {
   margin-bottom: var(--space-5);
 }
@@ -2845,6 +2897,7 @@ textarea:disabled {
   }
 
   .meeting-review-actions,
+  .meeting-type-edit-select,
   .dashboard-review-panel,
   .review-queue-shell {
     display: none !important;
