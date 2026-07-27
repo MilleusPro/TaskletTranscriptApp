@@ -6568,8 +6568,19 @@ function openReviewQueueWithFilter(filterLabel = 'All pending') {
 }
 
 function renderDashboardReviewIndicator(counts) {
+  const hasPendingReviewItems = (counts.needsReview + counts.needsCorrection) > 0;
+  const dashboardReviewToneClass = hasPendingReviewItems
+    ? 'dashboard-review-panel--pending'
+    : 'dashboard-review-panel--clear';
+  const dashboardReviewPanelInlineStyle = hasPendingReviewItems
+    ? 'background:#ffe8e7;border-color:#efb6b5;'
+    : 'background:#e9f8ef;border-color:#caecd7;';
+  const dashboardReviewCardInlineStyle = hasPendingReviewItems
+    ? 'background:#fff4f3;border-color:#efb6b5;'
+    : 'background:#f2fcf6;border-color:#caecd7;';
+
   return `
-    <section class="panel-card dashboard-review-panel">
+    <section class="panel-card dashboard-review-panel ${dashboardReviewToneClass}" style="${dashboardReviewPanelInlineStyle}">
       <div class="section-heading dashboard-review-heading">
         <div>
           <h3>Review Queue</h3>
@@ -6577,11 +6588,11 @@ function renderDashboardReviewIndicator(counts) {
         </div>
       </div>
       <div class="dashboard-review-grid">
-        <button class="dashboard-review-card dashboard-review-card--needs-review js-open-review-queue-filter" type="button" data-review-queue-filter="Needs review">
+        <button class="dashboard-review-card dashboard-review-card--needs-review js-open-review-queue-filter" type="button" data-review-queue-filter="Needs review" style="${dashboardReviewCardInlineStyle}">
           <span class="dashboard-review-card-title">Needs review</span>
           <strong class="dashboard-review-card-count">${counts.needsReview}</strong>
         </button>
-        <button class="dashboard-review-card dashboard-review-card--needs-correction js-open-review-queue-filter" type="button" data-review-queue-filter="Needs correction">
+        <button class="dashboard-review-card dashboard-review-card--needs-correction js-open-review-queue-filter" type="button" data-review-queue-filter="Needs correction" style="${dashboardReviewCardInlineStyle}">
           <span class="dashboard-review-card-title">Needs correction</span>
           <strong class="dashboard-review-card-count">${counts.needsCorrection}</strong>
         </button>
@@ -6626,6 +6637,11 @@ function renderReviewQueueMeetingCard(meeting, selectedFilter) {
 
 function renderReviewQueue() {
   const selectedFilter = REVIEW_QUEUE_FILTER_OPTIONS.includes(state.reviewQueueFilter) ? state.reviewQueueFilter : 'All pending';
+  const reviewCounts = getReviewQueueStatusCounts(getAllMeetings());
+  const hasPendingReviewItems = (reviewCounts.needsReview + reviewCounts.needsCorrection) > 0;
+  const queueShellToneClass = hasPendingReviewItems
+    ? 'review-queue-shell--pending'
+    : 'review-queue-shell--clear';
   const filteredMeetings = getReviewQueueMeetings(selectedFilter);
   const tabs = REVIEW_QUEUE_FILTER_OPTIONS.map((filterLabel) => {
     const isActiveFilter = filterLabel === selectedFilter;
@@ -6636,7 +6652,7 @@ function renderReviewQueue() {
     : renderEmptyState('No meetings currently need review.', selectedFilter === 'Reviewed' ? 'No reviewed meetings match this filter.' : 'All imported meetings are currently reviewed.');
 
   return `
-    <section class="panel-card review-queue-shell">
+    <section class="panel-card review-queue-shell ${queueShellToneClass}">
       <div class="section-heading">
         <div>
           <p class="eyebrow">Meeting review</p>

@@ -926,6 +926,26 @@ textarea:disabled {
   margin-bottom: var(--space-5);
 }
 
+.dashboard-review-panel--pending {
+  background: #ffe8e7;
+  border-color: #efb6b5;
+}
+
+.dashboard-review-panel--pending .dashboard-review-card {
+  background: #fff4f3;
+  border-color: #efb6b5;
+}
+
+.dashboard-review-panel--clear {
+  background: #e9f8ef;
+  border-color: #caecd7;
+}
+
+.dashboard-review-panel--clear .dashboard-review-card {
+  background: #f2fcf6;
+  border-color: #caecd7;
+}
+
 .dashboard-review-heading {
   margin-bottom: var(--space-3);
 }
@@ -986,6 +1006,16 @@ textarea:disabled {
 .review-queue-shell {
   display: grid;
   gap: var(--space-4);
+}
+
+.review-queue-shell--pending {
+  background: #ffe8e7;
+  border-color: #efb6b5;
+}
+
+.review-queue-shell--clear {
+  background: #e9f8ef;
+  border-color: #caecd7;
 }
 
 .review-queue-list {
