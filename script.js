@@ -70,7 +70,7 @@ const ACTION_OVERRIDE_ROW_COLUMNS = [
   'created_at',
   'updated_at'
 ].join(', ');
-const MEETING_ROW_COLUMNS = [
+const MEETING_ROW_COLUMN_NAMES = [
   'id',
   'user_id',
   'title',
@@ -101,7 +101,22 @@ const MEETING_ROW_COLUMNS = [
   'review_status',
   'created_at',
   'updated_at'
-].join(', ');
+];
+const MEETING_ROW_COLUMNS = MEETING_ROW_COLUMN_NAMES.join(', ');
+const UNSUPPORTED_MEETING_COLUMN_NAMES = new Set();
+const MODERN_MEETING_COLUMN_NAMES = [
+  'meeting_type',
+  'transcript_hash',
+  'review_status',
+  'source_type',
+  'storage_bucket',
+  'storage_path',
+  'original_file_name',
+  'original_file_size',
+  'original_file_mime_type',
+  'extracted_html',
+  'extra_sections'
+];
 
 let supabaseClient = null;
 let authSubscription = null;
@@ -154,8 +169,34 @@ function getSupabaseClientInitializationResult() {
     };
   }
 
-  const url = typeof SUPABASE_URL === 'string' ? SUPABASE_URL.trim() : '';
-  const publishableKey = typeof SUPABASE_PUBLISHABLE_KEY === 'string' ? SUPABASE_PUBLISHABLE_KEY.trim() : '';
+  const resolveGlobalString = (value) => (typeof value === 'string' ? value.trim() : '');
+  const resolveFromGlobalName = (name) => {
+    if (!name || typeof name !== 'string') {
+      return '';
+    }
+
+    if (typeof window !== 'undefined' && window && typeof window[name] === 'string') {
+      return resolveGlobalString(window[name]);
+    }
+
+    if (typeof globalThis !== 'undefined' && globalThis && typeof globalThis[name] === 'string') {
+      return resolveGlobalString(globalThis[name]);
+    }
+
+    return '';
+  };
+
+  const url = [
+    resolveGlobalString(typeof SUPABASE_URL === 'string' ? SUPABASE_URL : ''),
+    resolveFromGlobalName('SUPABASE_URL')
+  ].find(Boolean) || '';
+
+  const publishableKey = [
+    resolveGlobalString(typeof SUPABASE_PUBLISHABLE_KEY === 'string' ? SUPABASE_PUBLISHABLE_KEY : ''),
+    resolveGlobalString(typeof SUPABASE_ANON_KEY === 'string' ? SUPABASE_ANON_KEY : ''),
+    resolveFromGlobalName('SUPABASE_PUBLISHABLE_KEY'),
+    resolveFromGlobalName('SUPABASE_ANON_KEY')
+  ].find(Boolean) || '';
 
   if (!url && !publishableKey) {
     return {
@@ -180,7 +221,13 @@ function getSupabaseClientInitializationResult() {
 
   try {
     return {
-      client: window.supabase.createClient(url, publishableKey),
+      client: window.supabase.createClient(url, publishableKey, {
+        global: {
+          headers: {
+            apikey: publishableKey
+          }
+        }
+      }),
       error: ''
     };
   } catch (error) {
@@ -352,6 +399,157 @@ function clearCloudActionOverrideState() {
   authState.actionOverridesLoaded = false;
   state.overrideMigrationInProgress = false;
   state.overrideMigrationArchiveAvailable = false;
+}
+
+function getMeetingRowSelectColumns() {
+  const supportedColumnNames = MEETING_ROW_COLUMN_NAMES.filter((columnName) => !UNSUPPORTED_MEETING_COLUMN_NAMES.has(columnName));
+  return supportedColumnNames.length ? supportedColumnNames.join(', ') : MEETING_ROW_COLUMNS;
+}
+
+function getUniqueMeetingQueryProfiles() {
+  const removeColumns = (columns, columnsToDrop) => columns.filter((columnName) => !columnsToDrop.includes(columnName));
+  const replaceColumn = (columns, fromName, toName) => columns.map((columnName) => (columnName === fromName ? toName : columnName));
+  const baseColumns = MEETING_ROW_COLUMN_NAMES.filter((columnName) => !UNSUPPORTED_MEETING_COLUMN_NAMES.has(columnName));
+  const profileCandidates = [
+    {
+      columns: baseColumns,
+      order: ['meeting_date', 'updated_at']
+    },
+    {
+      columns: removeColumns(baseColumns, ['meeting_type', 'transcript_hash', 'review_status']),
+      order: ['meeting_date', 'updated_at']
+    },
+    {
+      columns: removeColumns(baseColumns, MODERN_MEETING_COLUMN_NAMES),
+      order: ['meeting_date', 'updated_at']
+    },
+    {
+      columns: replaceColumn(removeColumns(baseColumns, MODERN_MEETING_COLUMN_NAMES), 'meeting_date', 'date'),
+      order: ['date', 'updated_at']
+    },
+    {
+      columns: [
+        'id',
+        'user_id',
+        'title',
+        'customer',
+        'partner',
+        'participants',
+        'subject',
+        'summary',
+        'decisions',
+        'actions',
+        'open_questions',
+        'commercial_notes',
+        'cleaned_transcript',
+        'extracted_text',
+        'created_at',
+        'updated_at'
+      ],
+      order: ['updated_at']
+    }
+  ];
+
+  const deduplicatedProfiles = [];
+  const seen = new Set();
+  profileCandidates.forEach((profile) => {
+    const normalizedColumns = profile.columns.filter(Boolean);
+    if (!normalizedColumns.length) {
+      return;
+    }
+
+    const signature = `${normalizedColumns.join(',')}|${profile.order.join(',')}`;
+    if (seen.has(signature)) {
+      return;
+    }
+
+    seen.add(signature);
+    deduplicatedProfiles.push({
+      columns: normalizedColumns,
+      order: profile.order
+    });
+  });
+
+  return deduplicatedProfiles;
+}
+
+async function fetchMeetingsWithProfile(profile, userId) {
+  let query = supabaseClient
+    .from('meetings')
+    .select(profile.columns.join(', '))
+    .eq('user_id', userId);
+
+  profile.order.forEach((columnName) => {
+    query = query.order(columnName, { ascending: false });
+  });
+
+  return query;
+}
+
+function extractMissingMeetingColumnName(error) {
+  if (!error || typeof error !== 'object') {
+    return '';
+  }
+
+  const combined = [error.message, error.details, error.hint]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join(' ');
+
+  if (!combined) {
+    return '';
+  }
+
+  const exactMatch = combined.match(/'([a-z0-9_]+)'\s+column\s+of\s+'meetings'/i);
+  if (exactMatch && exactMatch[1]) {
+    return exactMatch[1].toLowerCase();
+  }
+
+  const genericMatch = combined.match(/column\s+['\"]?([a-z0-9_]+)['\"]?/i);
+  if (genericMatch && genericMatch[1]) {
+    return genericMatch[1].toLowerCase();
+  }
+
+  return '';
+}
+
+function registerUnsupportedMeetingColumnFromError(error) {
+  const missingColumnName = extractMissingMeetingColumnName(error);
+  if (!missingColumnName || !MEETING_ROW_COLUMN_NAMES.includes(missingColumnName)) {
+    return false;
+  }
+
+  if (UNSUPPORTED_MEETING_COLUMN_NAMES.has(missingColumnName)) {
+    return false;
+  }
+
+  UNSUPPORTED_MEETING_COLUMN_NAMES.add(missingColumnName);
+  return true;
+}
+
+function stripUnsupportedMeetingColumns(meetingRow) {
+  if (!meetingRow || typeof meetingRow !== 'object') {
+    return meetingRow;
+  }
+
+  if (!UNSUPPORTED_MEETING_COLUMN_NAMES.size) {
+    return meetingRow;
+  }
+
+  return Object.entries(meetingRow).reduce((sanitizedRow, [key, value]) => {
+    if (!UNSUPPORTED_MEETING_COLUMN_NAMES.has(key)) {
+      sanitizedRow[key] = value;
+    }
+    return sanitizedRow;
+  }, {});
+}
+
+function getCompatMeetingColumnLabel() {
+  if (!UNSUPPORTED_MEETING_COLUMN_NAMES.size) {
+    return '';
+  }
+
+  const sortedColumns = [...UNSUPPORTED_MEETING_COLUMN_NAMES].sort();
+  return `Cloud schema missing meeting columns: ${sortedColumns.join(', ')}.`; 
 }
 
 function getDefaultApplicationSettings() {
@@ -548,12 +746,25 @@ async function loadAuthenticatedMeetings() {
   state.cloudMeetingsError = '';
   state.cloudMeetingsLoaded = false;
 
-  const { data, error } = await supabaseClient
-    .from('meetings')
-    .select(MEETING_ROW_COLUMNS)
-    .eq('user_id', authState.user.id)
-    .order('meeting_date', { ascending: false })
-    .order('updated_at', { ascending: false });
+  let data = null;
+  let error = null;
+  const profiles = getUniqueMeetingQueryProfiles();
+
+  for (const profile of profiles) {
+    ({ data, error } = await fetchMeetingsWithProfile(profile, authState.user.id));
+    if (!error) {
+      break;
+    }
+
+    const handledAsMissingColumn = registerUnsupportedMeetingColumnFromError(error);
+    if (handledAsMissingColumn) {
+      continue;
+    }
+
+    MODERN_MEETING_COLUMN_NAMES.forEach((columnName) => {
+      UNSUPPORTED_MEETING_COLUMN_NAMES.add(columnName);
+    });
+  }
 
   if (loadToken !== cloudMeetingsLoadToken) {
     return { success: false, error: 'Meeting loading was superseded by a newer session state.' };
@@ -564,7 +775,10 @@ async function loadAuthenticatedMeetings() {
   if (error) {
     state.savedMeetings = [];
     state.cloudMeetingsLoaded = false;
-    authState.meetingsLoadError = 'Unable to load cloud meetings. Please try again.';
+    const compatibilityLabel = getCompatMeetingColumnLabel();
+    authState.meetingsLoadError = compatibilityLabel
+      ? `Unable to load cloud meetings. ${compatibilityLabel}`
+      : 'Unable to load cloud meetings. Please try again.';
     state.cloudMeetingsError = authState.meetingsLoadError;
     return { success: false, error: authState.meetingsLoadError };
   }
@@ -575,6 +789,12 @@ async function loadAuthenticatedMeetings() {
   state.cloudMeetingsLoaded = true;
   authState.meetingsLoadError = '';
   state.cloudMeetingsError = '';
+
+  const compatibilityLabel = getCompatMeetingColumnLabel();
+  if (compatibilityLabel) {
+    state.cloudMeetingsError = compatibilityLabel;
+  }
+
   return { success: true };
 }
 
@@ -2467,7 +2687,7 @@ function mapMeetingToDatabaseRow(meeting, authenticatedUserId) {
   const storagePath = String(normalizedMeeting.storagePath || '').trim();
   const storageBucket = String(normalizedMeeting.storageBucket || '').trim() || (storagePath ? TRANSCRIPT_STORAGE_BUCKET : '');
 
-  return {
+  const row = {
     id: String(normalizedMeeting.id || createMeetingId()),
     user_id: String(authenticatedUserId || ''),
     title: String(normalizedMeeting.title || '').trim(),
@@ -2506,6 +2726,8 @@ function mapMeetingToDatabaseRow(meeting, authenticatedUserId) {
     created_at: normalizedMeeting.createdAt || now,
     updated_at: normalizedMeeting.updatedAt || now
   };
+
+  return stripUnsupportedMeetingColumns(row);
 }
 
 function mapDatabaseRowToMeeting(row) {
@@ -2520,8 +2742,8 @@ function mapDatabaseRowToMeeting(row) {
     id: String(row.id || ''),
     userId: String(row.user_id || ''),
     title: String(row.title || '').trim(),
-    date: normalizeExtractedDate(row.meeting_date || ''),
-    dateText: normalizeExtractedDate(row.meeting_date || '') || '',
+    date: normalizeExtractedDate(row.meeting_date || row.date || ''),
+    dateText: normalizeExtractedDate(row.meeting_date || row.date || '') || '',
     startTime: String(row.start_time || '').trim(),
     duration: String(row.duration || '').trim(),
     durationMinutes: 0,
@@ -3953,7 +4175,7 @@ function saveMeetingEdits() {
     .update(meetingRow)
     .eq('id', meetingId)
     .eq('user_id', authState.user.id)
-    .select(MEETING_ROW_COLUMNS)
+    .select(getMeetingRowSelectColumns())
     .single()
     .then(({ data, error }) => {
       if (error || !data) {
@@ -7097,7 +7319,7 @@ async function updateMeetingReviewStatus(meetingId, nextStatus) {
     })
     .eq('id', meetingId)
     .eq('user_id', authState.user.id)
-    .select(MEETING_ROW_COLUMNS)
+    .select(getMeetingRowSelectColumns())
     .single();
 
   state.meetingReviewStatusSaving = false;
@@ -7150,7 +7372,7 @@ async function updateMeetingTypeForSelectedMeeting(nextMeetingType) {
     })
     .eq('id', meetingId)
     .eq('user_id', authState.user.id)
-    .select(MEETING_ROW_COLUMNS)
+    .select(getMeetingRowSelectColumns())
     .single();
 
   state.meetingTypeUpdateInProgress = false;
@@ -9915,7 +10137,7 @@ async function handleSaveMeeting(options = {}) {
   const { data, error } = await supabaseClient
     .from('meetings')
     .insert(meetingRow)
-    .select(MEETING_ROW_COLUMNS)
+    .select(getMeetingRowSelectColumns())
     .single();
 
   if (error || !data) {
@@ -10000,7 +10222,7 @@ async function handleImportLocalMeetingsToSupabase() {
     const { data, error } = await supabaseClient
       .from('meetings')
       .insert(meetingRow)
-      .select(MEETING_ROW_COLUMNS)
+      .select(getMeetingRowSelectColumns())
       .single();
 
     if (error || !data) {
