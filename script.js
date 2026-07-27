@@ -86,6 +86,7 @@ const MEETING_ROW_COLUMNS = [
   'original_file_name',
   'original_file_size',
   'original_file_mime_type',
+  'transcript_hash',
   'review_status',
   'created_at',
   'updated_at'
@@ -932,6 +933,25 @@ function createEmptyAiCleanupState() {
   };
 }
 
+function createEmptyImportDuplicateState() {
+  return {
+    checkInProgress: false,
+    checkError: '',
+    matches: [],
+    bestMatchId: '',
+    approvedSignature: ''
+  };
+}
+
+function resetImportDuplicateState() {
+  const duplicateState = createEmptyImportDuplicateState();
+  state.importDuplicateCheckInProgress = duplicateState.checkInProgress;
+  state.importDuplicateCheckError = duplicateState.checkError;
+  state.importDuplicateMatches = duplicateState.matches;
+  state.importDuplicateBestMatchId = duplicateState.bestMatchId;
+  state.importDuplicateApprovedSignature = duplicateState.approvedSignature;
+}
+
 function resetImportTransientState(options = {}) {
   const preserveSuccessMessage = Boolean(options.preserveSuccessMessage);
 
@@ -950,6 +970,7 @@ function resetImportTransientState(options = {}) {
   state.importTeamsDetection = createEmptyTeamsStructureDetection();
   state.importTeamsConfirmation = false;
   state.importAiCleanup = createEmptyAiCleanupState();
+  resetImportDuplicateState();
   resetImportParserDebugState();
 
   if (!preserveSuccessMessage) {
@@ -2284,6 +2305,7 @@ function normalizeMeetingRecord(meeting) {
   normalizedMeeting.storagePath = String(meeting.storagePath || '').trim();
   normalizedMeeting.originalFileName = String(meeting.originalFileName || '').trim();
   normalizedMeeting.originalFileMimeType = String(meeting.originalFileMimeType || '').trim();
+  normalizedMeeting.transcriptHash = sanitizeTranscriptHashValue(meeting.transcriptHash || meeting.transcript_hash);
   normalizedMeeting.sourceType = Object.values(IMPORT_MODES).includes(String(meeting.sourceType || '').trim())
     ? String(meeting.sourceType || '').trim()
     : '';
@@ -2459,6 +2481,7 @@ function mapMeetingToDatabaseRow(meeting, authenticatedUserId) {
       ? Math.trunc(Number(normalizedMeeting.originalFileSize))
       : null,
     original_file_mime_type: String(normalizedMeeting.originalFileMimeType || '').trim() || null,
+    transcript_hash: sanitizeTranscriptHashValue(normalizedMeeting.transcriptHash) || null,
     review_status: normalizeMeetingReviewStatus(normalizedMeeting.reviewStatus),
     created_at: normalizedMeeting.createdAt || now,
     updated_at: normalizedMeeting.updatedAt || now
@@ -2509,6 +2532,7 @@ function mapDatabaseRowToMeeting(row) {
     originalFileName: String(row.original_file_name || '').trim(),
     originalFileSize: Number.isFinite(Number(row.original_file_size)) ? Math.trunc(Number(row.original_file_size)) : null,
     originalFileMimeType: String(row.original_file_mime_type || '').trim(),
+    transcriptHash: sanitizeTranscriptHashValue(row.transcript_hash),
     reviewStatus: normalizeMeetingReviewStatus(row.review_status),
     customer: String(row.customer || '').trim(),
     partner: String(row.partner || '').trim(),
@@ -2834,6 +2858,11 @@ const state = {
   importTeamsDetection: createEmptyTeamsStructureDetection(),
   importTeamsConfirmation: false,
   importAiCleanup: createEmptyAiCleanupState(),
+  importDuplicateCheckInProgress: false,
+  importDuplicateCheckError: '',
+  importDuplicateMatches: [],
+  importDuplicateBestMatchId: '',
+  importDuplicateApprovedSignature: '',
   dataManagementError: '',
   dataManagementSuccess: '',
   dataManagementLastExportAt: '',
@@ -4870,6 +4899,578 @@ function hashTextStable(value) {
   }
 
   return (hash >>> 0).toString(16);
+}
+
+function sanitizeTranscriptHashValue(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return /^[a-f0-9]{6,64}$/.test(normalized) ? normalized : '';
+}
+
+function normalizeTranscriptForDuplicateDetection(value) {
+  return String(value || '')
+    .replace(/\r\n?/g, '\n')
+    .toLowerCase()
+    .replace(/[ \t\f\v]+/g, ' ')
+    .replace(/[ ]*\n[ ]*/g, '\n')
+    .replace(/\n{2,}/g, '\n')
+    .trim();
+}
+
+function getTranscriptHashForDuplicateDetection(value) {
+  const normalizedTranscript = normalizeTranscriptForDuplicateDetection(value);
+  return normalizedTranscript ? sanitizeTranscriptHashValue(hashTextStable(normalizedTranscript)) : '';
+}
+
+function normalizeTitleForDuplicateDetection(value) {
+  return normalizeCompanyName(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizeEntityNameForDuplicateDetection(value) {
+  return cleanupEntityDisplayName(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const DUPLICATE_TITLE_STOP_WORDS = new Set([
+  'the',
+  'and',
+  'for',
+  'with',
+  'from',
+  'that',
+  'this',
+  'meeting',
+  'call',
+  'session',
+  'review',
+  'update'
+]);
+
+function getTitleTokensForDuplicateDetection(value) {
+  const normalizedTitle = normalizeTitleForDuplicateDetection(value);
+  if (!normalizedTitle) {
+    return [];
+  }
+
+  return normalizedTitle
+    .split(' ')
+    .filter((token) => token.length > 2)
+    .filter((token) => !DUPLICATE_TITLE_STOP_WORDS.has(token));
+}
+
+function getTokenOverlapMetrics(firstTokens, secondTokens) {
+  const firstSet = new Set(Array.isArray(firstTokens) ? firstTokens : []);
+  const secondSet = new Set(Array.isArray(secondTokens) ? secondTokens : []);
+
+  if (!firstSet.size || !secondSet.size) {
+    return {
+      sharedCount: 0,
+      overlapScore: 0
+    };
+  }
+
+  let sharedCount = 0;
+  firstSet.forEach((token) => {
+    if (secondSet.has(token)) {
+      sharedCount += 1;
+    }
+  });
+
+  const overlapScore = sharedCount / Math.max(firstSet.size, secondSet.size);
+  return {
+    sharedCount,
+    overlapScore
+  };
+}
+
+function getTitleSimilarityDetails(firstTitle, secondTitle) {
+  const normalizedFirst = normalizeTitleForDuplicateDetection(firstTitle);
+  const normalizedSecond = normalizeTitleForDuplicateDetection(secondTitle);
+
+  const hasExactMatch = Boolean(normalizedFirst && normalizedFirst === normalizedSecond);
+  const hasContainment = Boolean(
+    normalizedFirst
+    && normalizedSecond
+    && normalizedFirst.length >= 12
+    && normalizedSecond.length >= 12
+    && (normalizedFirst.includes(normalizedSecond) || normalizedSecond.includes(normalizedFirst))
+  );
+
+  const overlap = getTokenOverlapMetrics(
+    getTitleTokensForDuplicateDetection(normalizedFirst),
+    getTitleTokensForDuplicateDetection(normalizedSecond)
+  );
+
+  const isStrongMatch = hasExactMatch || hasContainment || (overlap.sharedCount >= 3 && overlap.overlapScore >= 0.72);
+  const isPossibleMatch = isStrongMatch || (overlap.sharedCount >= 2 && overlap.overlapScore >= 0.52);
+
+  return {
+    hasExactMatch,
+    hasContainment,
+    overlap,
+    isStrongMatch,
+    isPossibleMatch
+  };
+}
+
+function normalizeParticipantNameForDuplicateDetection(value) {
+  return normalizeCompanyName(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getNormalizedParticipantsForDuplicateDetection(value) {
+  const normalizedNames = splitParticipantEntries(value)
+    .map((entry) => parseParticipantEntry(entry))
+    .filter(Boolean)
+    .map((entry) => normalizeParticipantNameForDuplicateDetection(entry.name || entry.originalEntry || ''))
+    .filter(Boolean);
+
+  return Array.from(new Set(normalizedNames)).sort((first, second) => first.localeCompare(second));
+}
+
+function getNormalizedParticipantsFromMeetingForDuplicateDetection(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return [];
+  }
+
+  const participantNames = extractParticipantRecordsFromMeeting(meeting)
+    .map((participant) => normalizeParticipantNameForDuplicateDetection(participant.name || participant.originalEntry || ''))
+    .filter(Boolean);
+
+  return Array.from(new Set(participantNames)).sort((first, second) => first.localeCompare(second));
+}
+
+function getParticipantOverlapMetrics(firstParticipants, secondParticipants) {
+  const overlap = getTokenOverlapMetrics(firstParticipants, secondParticipants);
+  const firstCount = Array.isArray(firstParticipants) ? firstParticipants.length : 0;
+  const secondCount = Array.isArray(secondParticipants) ? secondParticipants.length : 0;
+  const hasExactSetMatch = Boolean(
+    firstCount
+    && secondCount
+    && firstCount === secondCount
+    && overlap.sharedCount === firstCount
+  );
+
+  return {
+    sharedCount: overlap.sharedCount,
+    overlapScore: overlap.overlapScore,
+    hasExactSetMatch,
+    hasHighOverlap: overlap.sharedCount >= 2 && overlap.overlapScore >= 0.66,
+    hasMediumOverlap: overlap.sharedCount >= 2 && overlap.overlapScore >= 0.45
+  };
+}
+
+function getDateDistanceInDays(firstDate, secondDate) {
+  const normalizedFirst = normalizeExtractedDate(firstDate || '');
+  const normalizedSecond = normalizeExtractedDate(secondDate || '');
+  if (!normalizedFirst || !normalizedSecond) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const firstTimestamp = new Date(`${normalizedFirst}T00:00:00`).getTime();
+  const secondTimestamp = new Date(`${normalizedSecond}T00:00:00`).getTime();
+  if (!Number.isFinite(firstTimestamp) || !Number.isFinite(secondTimestamp)) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  return Math.abs(Math.round((firstTimestamp - secondTimestamp) / (1000 * 60 * 60 * 24)));
+}
+
+function normalizeOriginalFileNameForDuplicateDetection(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function getMeetingTranscriptTextForDuplicateDetection(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return '';
+  }
+
+  return String(
+    meeting.extractedText
+    || meeting.transcript
+    || meeting.cleanedTranscript
+    || ''
+  ).trim();
+}
+
+function getMeetingTranscriptHashForDuplicateDetection(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return '';
+  }
+
+  const persistedHash = sanitizeTranscriptHashValue(meeting.transcriptHash || meeting.transcript_hash);
+  if (persistedHash) {
+    return persistedHash;
+  }
+
+  const transcriptText = getMeetingTranscriptTextForDuplicateDetection(meeting);
+  return transcriptText ? getTranscriptHashForDuplicateDetection(transcriptText) : '';
+}
+
+function buildImportDuplicateCandidate(values) {
+  const normalizedTitle = normalizeTitleForDuplicateDetection(values.title || '');
+  const normalizedCustomer = normalizeEntityNameForDuplicateDetection(values.customer || '');
+  const normalizedPartner = normalizeEntityNameForDuplicateDetection(values.partner || '');
+  const normalizedDate = normalizeExtractedDate(values.date || '');
+  const normalizedParticipants = getNormalizedParticipantsForDuplicateDetection(values.participants || []);
+  const transcriptHash = getTranscriptHashForDuplicateDetection(values.transcriptText || '');
+  const normalizedFileName = normalizeOriginalFileNameForDuplicateDetection(values.originalFileName || '');
+  const normalizedSourceType = String(values.sourceType || '').trim();
+  const fileSize = Number.isFinite(Number(values.originalFileSize)) ? Math.trunc(Number(values.originalFileSize)) : null;
+
+  return {
+    title: String(values.title || '').trim(),
+    normalizedTitle,
+    date: normalizedDate,
+    customer: String(values.customer || '').trim(),
+    normalizedCustomer,
+    partner: String(values.partner || '').trim(),
+    normalizedPartner,
+    participants: normalizedParticipants,
+    transcriptHash,
+    originalFileName: String(values.originalFileName || '').trim(),
+    normalizedFileName,
+    originalFileSize: fileSize,
+    sourceType: normalizedSourceType
+  };
+}
+
+function getImportDuplicateCandidateSignature(candidate) {
+  const participantSignature = Array.isArray(candidate && candidate.participants)
+    ? candidate.participants.join('|')
+    : '';
+
+  return [
+    String(candidate && candidate.date ? candidate.date : ''),
+    String(candidate && candidate.normalizedTitle ? candidate.normalizedTitle : ''),
+    String(candidate && candidate.normalizedCustomer ? candidate.normalizedCustomer : ''),
+    String(candidate && candidate.normalizedPartner ? candidate.normalizedPartner : ''),
+    participantSignature,
+    String(candidate && candidate.transcriptHash ? candidate.transcriptHash : ''),
+    String(candidate && candidate.normalizedFileName ? candidate.normalizedFileName : ''),
+    Number.isFinite(Number(candidate && candidate.originalFileSize)) ? String(Math.trunc(Number(candidate.originalFileSize))) : '',
+    String(candidate && candidate.sourceType ? candidate.sourceType : '')
+  ].join('||');
+}
+
+function buildMeetingDuplicateComparable(meeting) {
+  const normalizedMeeting = normalizeMeetingRecord(meeting || {});
+  return {
+    id: String(normalizedMeeting.id || ''),
+    title: String(normalizedMeeting.title || '').trim(),
+    normalizedTitle: normalizeTitleForDuplicateDetection(normalizedMeeting.title || ''),
+    date: normalizeExtractedDate(normalizedMeeting.date || ''),
+    customer: String(getMeetingDisplayCustomer(normalizedMeeting) || '').trim(),
+    normalizedCustomer: normalizeEntityNameForDuplicateDetection(getMeetingDisplayCustomer(normalizedMeeting) || ''),
+    partner: String(getMeetingDisplayPartner(normalizedMeeting) || '').trim(),
+    normalizedPartner: normalizeEntityNameForDuplicateDetection(getMeetingDisplayPartner(normalizedMeeting) || ''),
+    participants: getNormalizedParticipantsFromMeetingForDuplicateDetection(normalizedMeeting),
+    transcriptHash: getMeetingTranscriptHashForDuplicateDetection(normalizedMeeting),
+    originalFileName: String(normalizedMeeting.originalFileName || '').trim(),
+    normalizedFileName: normalizeOriginalFileNameForDuplicateDetection(normalizedMeeting.originalFileName || ''),
+    originalFileSize: Number.isFinite(Number(normalizedMeeting.originalFileSize))
+      ? Math.trunc(Number(normalizedMeeting.originalFileSize))
+      : null,
+    sourceType: String(normalizedMeeting.sourceType || '').trim(),
+    meeting: normalizedMeeting
+  };
+}
+
+function getDuplicateSignals(candidate, existingMeetingComparable) {
+  const titleSimilarity = getTitleSimilarityDetails(candidate.normalizedTitle, existingMeetingComparable.normalizedTitle);
+  const participantOverlap = getParticipantOverlapMetrics(candidate.participants, existingMeetingComparable.participants);
+  const dateDistanceDays = getDateDistanceInDays(candidate.date, existingMeetingComparable.date);
+
+  const sameTranscriptHash = Boolean(
+    candidate.transcriptHash
+    && existingMeetingComparable.transcriptHash
+    && candidate.transcriptHash === existingMeetingComparable.transcriptHash
+  );
+  const sameFileName = Boolean(
+    candidate.normalizedFileName
+    && existingMeetingComparable.normalizedFileName
+    && candidate.normalizedFileName === existingMeetingComparable.normalizedFileName
+  );
+  const sameFileSize = Number.isFinite(Number(candidate.originalFileSize))
+    && Number.isFinite(Number(existingMeetingComparable.originalFileSize))
+    && Math.trunc(Number(candidate.originalFileSize)) === Math.trunc(Number(existingMeetingComparable.originalFileSize));
+  const sameMeetingDate = Boolean(candidate.date && existingMeetingComparable.date && candidate.date === existingMeetingComparable.date);
+  const sameCustomer = Boolean(
+    candidate.normalizedCustomer
+    && existingMeetingComparable.normalizedCustomer
+    && candidate.normalizedCustomer === existingMeetingComparable.normalizedCustomer
+  );
+  const samePartner = Boolean(
+    candidate.normalizedPartner
+    && existingMeetingComparable.normalizedPartner
+    && candidate.normalizedPartner === existingMeetingComparable.normalizedPartner
+  );
+  const sameSourceType = Boolean(
+    candidate.sourceType
+    && existingMeetingComparable.sourceType
+    && candidate.sourceType === existingMeetingComparable.sourceType
+  );
+
+  const isShortDateWindow = Number.isFinite(dateDistanceDays) && dateDistanceDays <= 14;
+  const isVeryShortDateWindow = Number.isFinite(dateDistanceDays) && dateDistanceDays <= 3;
+
+  const reasons = [];
+  if (sameTranscriptHash) {
+    reasons.push('Same transcript content');
+  }
+  if (sameFileName && sameFileSize) {
+    reasons.push('Same filename and file size');
+  }
+  if (sameMeetingDate && titleSimilarity.hasExactMatch) {
+    reasons.push('Same date and title');
+  }
+  if (samePartner && participantOverlap.sharedCount > 0) {
+    reasons.push('Same partner and participant list');
+  }
+  if (sameCustomer && titleSimilarity.isStrongMatch) {
+    reasons.push('Same customer and closely matching title');
+  }
+  if (participantOverlap.hasExactSetMatch && sameMeetingDate) {
+    reasons.push('Same participant set on the same date');
+  }
+
+  const signalCount = [
+    sameTranscriptHash,
+    sameFileName,
+    sameFileSize,
+    sameMeetingDate,
+    titleSimilarity.hasExactMatch,
+    titleSimilarity.isStrongMatch,
+    sameCustomer,
+    samePartner,
+    participantOverlap.hasExactSetMatch,
+    participantOverlap.hasHighOverlap,
+    participantOverlap.hasMediumOverlap,
+    sameSourceType,
+    isShortDateWindow
+  ].filter(Boolean).length;
+
+  return {
+    sameTranscriptHash,
+    sameFileName,
+    sameFileSize,
+    sameMeetingDate,
+    sameCustomer,
+    samePartner,
+    sameSourceType,
+    isShortDateWindow,
+    isVeryShortDateWindow,
+    titleSimilarity,
+    participantOverlap,
+    dateDistanceDays,
+    signalCount,
+    reasons
+  };
+}
+
+function classifyDuplicateConfidence(signals) {
+  if (signals.sameTranscriptHash || (signals.sameFileName && signals.sameFileSize && signals.sameMeetingDate)) {
+    return 'exact';
+  }
+
+  if (
+    (signals.sameMeetingDate && signals.titleSimilarity.isStrongMatch && (signals.sameCustomer || signals.samePartner || signals.participantOverlap.hasHighOverlap || signals.participantOverlap.hasExactSetMatch))
+    || (signals.sameFileName && (signals.sameMeetingDate || signals.titleSimilarity.isStrongMatch) && (signals.sameCustomer || signals.samePartner || signals.participantOverlap.hasMediumOverlap))
+    || (signals.sameMeetingDate && signals.sameSourceType && signals.titleSimilarity.isStrongMatch && signals.participantOverlap.hasMediumOverlap)
+  ) {
+    return 'very_likely';
+  }
+
+  if (
+    (signals.sameMeetingDate && signals.titleSimilarity.isPossibleMatch)
+    || ((signals.sameCustomer || signals.samePartner) && signals.titleSimilarity.isPossibleMatch && signals.isShortDateWindow)
+    || (signals.participantOverlap.hasMediumOverlap && signals.sameMeetingDate)
+    || (signals.sameFileName && signals.sameMeetingDate)
+    || (signals.sameCustomer && signals.samePartner && signals.isVeryShortDateWindow)
+  ) {
+    return 'possible';
+  }
+
+  return '';
+}
+
+function getDuplicateMatchLevelRank(level) {
+  if (level === 'exact') {
+    return 0;
+  }
+
+  if (level === 'very_likely') {
+    return 1;
+  }
+
+  if (level === 'possible') {
+    return 2;
+  }
+
+  return 3;
+}
+
+function getDuplicateMatchLevelLabel(level) {
+  if (level === 'exact') {
+    return 'Exact duplicate';
+  }
+
+  if (level === 'very_likely') {
+    return 'Very likely duplicate';
+  }
+
+  return 'Possible duplicate';
+}
+
+function getDuplicateMatchLevelClass(level) {
+  if (level === 'exact') {
+    return 'duplicate-level-badge duplicate-level-badge--exact';
+  }
+
+  if (level === 'very_likely') {
+    return 'duplicate-level-badge duplicate-level-badge--very-likely';
+  }
+
+  return 'duplicate-level-badge duplicate-level-badge--possible';
+}
+
+function sortDuplicateMatches(matches) {
+  return [...(Array.isArray(matches) ? matches : [])].sort((first, second) => {
+    const firstRank = getDuplicateMatchLevelRank(first.level);
+    const secondRank = getDuplicateMatchLevelRank(second.level);
+    if (firstRank !== secondRank) {
+      return firstRank - secondRank;
+    }
+
+    return compareMeetingsNewestFirst(first.meeting, second.meeting);
+  });
+}
+
+function findDuplicateImportMatches(candidate, meetings) {
+  const normalizedMeetings = Array.isArray(meetings) ? meetings : [];
+  const matches = normalizedMeetings
+    .map((meeting) => {
+      const comparable = buildMeetingDuplicateComparable(meeting);
+      if (!comparable.id) {
+        return null;
+      }
+
+      const signals = getDuplicateSignals(candidate, comparable);
+      const level = classifyDuplicateConfidence(signals);
+      if (!level) {
+        return null;
+      }
+
+      const reasons = signals.reasons.length
+        ? signals.reasons
+        : [
+          signals.sameMeetingDate ? 'Same meeting date' : '',
+          signals.titleSimilarity.isPossibleMatch ? 'Similar meeting title' : '',
+          signals.sameCustomer ? 'Same customer' : '',
+          signals.samePartner ? 'Same partner' : '',
+          signals.participantOverlap.sharedCount > 0 ? 'Overlapping participants' : ''
+        ].filter(Boolean);
+
+      return {
+        meetingId: comparable.id,
+        meeting: comparable.meeting,
+        level,
+        levelLabel: getDuplicateMatchLevelLabel(level),
+        levelClassName: getDuplicateMatchLevelClass(level),
+        signalCount: signals.signalCount,
+        reasons: reasons.slice(0, 4),
+        participantSharedCount: signals.participantOverlap.sharedCount,
+        participantOverlapScore: signals.participantOverlap.overlapScore,
+        sameTranscriptHash: signals.sameTranscriptHash,
+        sameFileName: signals.sameFileName,
+        sameFileSize: signals.sameFileSize,
+        sameMeetingDate: signals.sameMeetingDate,
+        sameCustomer: signals.sameCustomer,
+        samePartner: signals.samePartner,
+        sameSourceType: signals.sameSourceType
+      };
+    })
+    .filter(Boolean);
+
+  return sortDuplicateMatches(matches).slice(0, 5);
+}
+
+function getImportDuplicateBestMatch() {
+  const duplicateMatches = Array.isArray(state.importDuplicateMatches) ? state.importDuplicateMatches : [];
+  if (!duplicateMatches.length) {
+    return null;
+  }
+
+  if (state.importDuplicateBestMatchId) {
+    const selected = duplicateMatches.find((match) => match.meetingId === state.importDuplicateBestMatchId);
+    if (selected) {
+      return selected;
+    }
+  }
+
+  return duplicateMatches[0] || null;
+}
+
+function dismissImportDuplicateWarning() {
+  state.importDuplicateCheckError = '';
+  state.importDuplicateMatches = [];
+  state.importDuplicateBestMatchId = '';
+  state.importSaveStatus = '';
+  state.importSaveInProgress = false;
+  state.importDuplicateCheckInProgress = false;
+}
+
+function openExistingDuplicateMeetingFromImport() {
+  const bestMatch = getImportDuplicateBestMatch();
+  if (!bestMatch || !bestMatch.meetingId) {
+    return;
+  }
+
+  dismissImportDuplicateWarning();
+  state.importDuplicateApprovedSignature = '';
+  state.activeSection = 'meetings';
+  state.selectedMeetingId = bestMatch.meetingId;
+  state.meetingEditMode = false;
+  state.meetingEditDraft = null;
+  state.meetingEditError = '';
+  state.meetingReturnContext = null;
+  state.activeViewerTab = 'overview';
+  renderViews();
+}
+
+function continueImportSaveAfterDuplicateWarning() {
+  const reviewedDate = normalizeExtractedDate(state.importReview.date || state.importReview.dateText || '');
+  const reviewedTranscript = sanitizePlainText(
+    String(state.importReview.cleanedTranscript || state.importExtractedText || state.importRawTranscriptText || ''),
+    300000
+  );
+
+  const duplicateCandidate = buildImportDuplicateCandidate({
+    title: state.importReview.meetingTitle,
+    date: reviewedDate,
+    customer: state.importReview.customer,
+    partner: state.importReview.partner,
+    participants: state.importReview.participants,
+    transcriptText: reviewedTranscript,
+    originalFileName: state.importSelectedFile ? state.importSelectedFile.name : '',
+    originalFileSize: state.importSelectedFile ? state.importSelectedFile.size : null,
+    sourceType: getActiveImportSourceType()
+  });
+
+  state.importDuplicateApprovedSignature = getImportDuplicateCandidateSignature(duplicateCandidate);
+  state.importDuplicateCheckError = '';
+  state.importDuplicateMatches = [];
+  state.importDuplicateBestMatchId = '';
+  handleSaveMeeting({ skipDuplicatePrompt: true });
 }
 
 function getImportedActionId(meetingId, actionIndex, lineText) {
@@ -8283,6 +8884,81 @@ function renderImportWarnings() {
     .join('');
 }
 
+function renderImportDuplicateWarningPanel() {
+  const hasCheckInProgress = Boolean(state.importDuplicateCheckInProgress);
+  const duplicateMatches = Array.isArray(state.importDuplicateMatches) ? state.importDuplicateMatches : [];
+  const duplicateCheckError = String(state.importDuplicateCheckError || '').trim();
+  if (!hasCheckInProgress && !duplicateMatches.length && !duplicateCheckError) {
+    return '';
+  }
+
+  if (duplicateCheckError) {
+    return `<p class="import-warning" role="status">${escapeHtml(duplicateCheckError)}</p>`;
+  }
+
+  if (hasCheckInProgress) {
+    return `
+      <div class="import-duplicate-panel" role="status" aria-live="polite">
+        <h4>Checking for duplicates</h4>
+        <p class="entity-meta">Comparing transcript details with your existing meetings before upload.</p>
+      </div>
+    `;
+  }
+
+  if (!duplicateMatches.length) {
+    return '';
+  }
+
+  const bestMatch = getImportDuplicateBestMatch();
+  const additionalMatches = duplicateMatches.slice(1);
+  const bestReasons = bestMatch && Array.isArray(bestMatch.reasons) ? bestMatch.reasons : [];
+
+  return `
+    <div class="import-duplicate-panel" role="alert" aria-live="assertive">
+      <div class="section-heading">
+        <h4>Potential duplicate detected</h4>
+      </div>
+      <p class="entity-meta">This meeting appears similar to an existing record. Review before importing a duplicate.</p>
+
+      ${bestMatch ? `
+        <article class="import-duplicate-match import-duplicate-match--best">
+          <div class="import-duplicate-heading-row">
+            <span class="${escapeHtml(bestMatch.levelClassName)}">${escapeHtml(bestMatch.levelLabel)}</span>
+            <button class="secondary-button secondary-button--compact js-open-import-duplicate-meeting" type="button" data-meeting-id="${escapeHtml(bestMatch.meetingId)}">Open existing meeting</button>
+          </div>
+          <p><strong>${escapeHtml(bestMatch.meeting.title || 'Untitled meeting')}</strong></p>
+          <p class="entity-meta">${escapeHtml(bestMatch.meeting.date ? formatDate(bestMatch.meeting.date) : 'Date not available')} · Customer: ${escapeHtml(getMeetingDisplayCustomer(bestMatch.meeting))} · Partner: ${escapeHtml(getMeetingDisplayPartner(bestMatch.meeting))}</p>
+          ${bestReasons.length ? `<ul class="import-duplicate-reasons">${bestReasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>` : ''}
+        </article>
+      ` : ''}
+
+      ${additionalMatches.length ? `
+        <details class="import-duplicate-more">
+          <summary>Show additional possible matches (${additionalMatches.length})</summary>
+          <div class="import-duplicate-match-list">
+            ${additionalMatches.map((match) => `
+              <article class="import-duplicate-match">
+                <div class="import-duplicate-heading-row">
+                  <span class="${escapeHtml(match.levelClassName)}">${escapeHtml(match.levelLabel)}</span>
+                  <button class="secondary-button secondary-button--compact js-open-import-duplicate-meeting" type="button" data-meeting-id="${escapeHtml(match.meetingId)}">Open existing meeting</button>
+                </div>
+                <p><strong>${escapeHtml(match.meeting.title || 'Untitled meeting')}</strong></p>
+                <p class="entity-meta">${escapeHtml(match.meeting.date ? formatDate(match.meeting.date) : 'Date not available')} · Customer: ${escapeHtml(getMeetingDisplayCustomer(match.meeting))} · Partner: ${escapeHtml(getMeetingDisplayPartner(match.meeting))}</p>
+              </article>
+            `).join('')}
+          </div>
+        </details>
+      ` : ''}
+
+      <div class="import-actions">
+        <button class="secondary-button js-open-import-duplicate-meeting" type="button" data-meeting-id="${escapeHtml(bestMatch && bestMatch.meetingId ? bestMatch.meetingId : '')}" ${bestMatch && bestMatch.meetingId ? '' : 'disabled'}>Open existing meeting</button>
+        <button class="primary-button js-continue-import-save-anyway" type="button">Save anyway</button>
+        <button class="secondary-button js-cancel-import-duplicate-warning" type="button">Cancel</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderImportExtraSectionEditors() {
   const sections = Array.isArray(state.importReview.extraSections) ? state.importReview.extraSections : [];
   if (!sections.length) {
@@ -8428,6 +9104,7 @@ function renderImport() {
     ? `<p class="import-success" role="status">${escapeHtml(state.importSuccessMessage)}</p>`
     : '';
   const warningMessages = renderImportWarnings();
+  const duplicateWarningPanel = renderImportDuplicateWarningPanel();
   const saveStatusMessage = state.importSaveInProgress && state.importSaveStatus
     ? `<p class="import-hint" role="status">${escapeHtml(state.importSaveStatus)}</p>`
     : '';
@@ -8708,6 +9385,7 @@ function renderImport() {
 
       ${errorMessage}
       ${warningMessages}
+      ${duplicateWarningPanel}
       ${successMessage}
       ${saveStatusMessage}
       ${extractionStatus}
@@ -8875,7 +9553,8 @@ async function handleImportFileSelection(file) {
   }
 }
 
-async function handleSaveMeeting() {
+async function handleSaveMeeting(options = {}) {
+  const skipDuplicatePrompt = Boolean(options.skipDuplicatePrompt);
   if (state.importSaveInProgress || !canSaveMeeting()) {
     return;
   }
@@ -8905,27 +9584,6 @@ async function handleSaveMeeting() {
     return;
   }
 
-  const sourceFile = fileValidation.file;
-  const meetingId = createMeetingId();
-
-  state.importSaveStatus = 'Uploading original document...';
-  renderViews();
-  updateImportSaveButtonState();
-
-  const uploadResult = await uploadOriginalTranscriptToSupabase(sourceFile, meetingId);
-  if (!uploadResult.success) {
-    state.importError = uploadResult.error;
-    state.importSaveInProgress = false;
-    state.importSaveStatus = '';
-    renderViews();
-    updateImportSaveButtonState();
-    return;
-  }
-
-  state.importSaveStatus = 'Saving meeting metadata...';
-  renderViews();
-  updateImportSaveButtonState();
-
   const title = state.importReview.meetingTitle.trim();
   const date = state.importReview.date.trim();
   const startTime = state.importReview.startTime.trim();
@@ -8948,11 +9606,71 @@ async function handleSaveMeeting() {
     ? sanitizePlainText(state.importRawTranscriptText, 300000)
     : sanitizePlainText(state.importExtractedText, 300000);
   const extractedHtml = isRawTeamsImportMode() ? '' : state.importExtractedHtml;
+  const normalizedMeetingDate = normalizeExtractedDate(date) || '';
+  const duplicateCandidate = buildImportDuplicateCandidate({
+    title,
+    date: normalizedMeetingDate,
+    customer,
+    partner,
+    participants,
+    transcriptText: cleanedTranscript || extractedText,
+    originalFileName: state.importSelectedFile ? state.importSelectedFile.name : '',
+    originalFileSize: state.importSelectedFile ? state.importSelectedFile.size : null,
+    sourceType: getActiveImportSourceType()
+  });
+  const duplicateCandidateSignature = getImportDuplicateCandidateSignature(duplicateCandidate);
+
+  if (!skipDuplicatePrompt && state.importDuplicateApprovedSignature !== duplicateCandidateSignature) {
+    state.importDuplicateCheckInProgress = true;
+    state.importDuplicateCheckError = '';
+    state.importDuplicateMatches = [];
+    state.importDuplicateBestMatchId = '';
+    renderViews();
+    updateImportSaveButtonState();
+
+    const duplicateMatches = findDuplicateImportMatches(duplicateCandidate, state.savedMeetings);
+    state.importDuplicateCheckInProgress = false;
+
+    if (duplicateMatches.length) {
+      state.importDuplicateMatches = duplicateMatches;
+      state.importDuplicateBestMatchId = duplicateMatches[0].meetingId;
+      state.importSaveInProgress = false;
+      state.importSaveStatus = '';
+      renderViews();
+      updateImportSaveButtonState();
+      return;
+    }
+
+    state.importDuplicateMatches = [];
+    state.importDuplicateBestMatchId = '';
+    state.importDuplicateCheckError = '';
+  }
+
+  const sourceFile = fileValidation.file;
+  const meetingId = createMeetingId();
+
+  state.importSaveStatus = 'Uploading original document...';
+  renderViews();
+  updateImportSaveButtonState();
+
+  const uploadResult = await uploadOriginalTranscriptToSupabase(sourceFile, meetingId);
+  if (!uploadResult.success) {
+    state.importError = uploadResult.error;
+    state.importSaveInProgress = false;
+    state.importSaveStatus = '';
+    renderViews();
+    updateImportSaveButtonState();
+    return;
+  }
+
+  state.importSaveStatus = 'Saving meeting metadata...';
+  renderViews();
+  updateImportSaveButtonState();
 
   const meeting = {
     id: meetingId,
     title,
-    date: normalizeExtractedDate(date) || '',
+    date: normalizedMeetingDate,
     dateText: state.importReview.dateText || date,
     startTime,
     duration,
@@ -8983,6 +9701,7 @@ async function handleSaveMeeting() {
     originalFileName: uploadResult.originalFileName,
     originalFileSize: uploadResult.originalFileSize,
     originalFileMimeType: uploadResult.originalFileMimeType,
+    transcriptHash: duplicateCandidate.transcriptHash,
     customer,
     partner,
     participants,
@@ -9013,6 +9732,7 @@ async function handleSaveMeeting() {
   const savedMeeting = mapDatabaseRowToMeeting(data);
   state.savedMeetings = [savedMeeting, ...state.savedMeetings].sort(compareMeetingsNewestFirst);
   state.importSelectedFile = null;
+  state.importDuplicateApprovedSignature = '';
   resetImportTransientState({ preserveSuccessMessage: true });
   state.importSuccessMessage = `Meeting saved successfully as ${savedMeeting.title}.`;
   state.importSaveInProgress = false;
@@ -9913,6 +10633,11 @@ function attachInteractions() {
         }
       }
 
+      state.importDuplicateApprovedSignature = '';
+      state.importDuplicateMatches = [];
+      state.importDuplicateBestMatchId = '';
+      state.importDuplicateCheckError = '';
+
       updateImportSaveButtonState();
     });
   });
@@ -9978,6 +10703,33 @@ function attachInteractions() {
   document.querySelectorAll('.js-save-import-meeting').forEach((button) => {
     button.addEventListener('click', () => {
       handleSaveMeeting();
+    });
+  });
+
+  document.querySelectorAll('.js-open-import-duplicate-meeting').forEach((button) => {
+    button.addEventListener('click', () => {
+      const meetingId = String(button.dataset.meetingId || '').trim();
+      if (!meetingId) {
+        openExistingDuplicateMeetingFromImport();
+        return;
+      }
+
+      state.importDuplicateBestMatchId = meetingId;
+      openExistingDuplicateMeetingFromImport();
+    });
+  });
+
+  document.querySelectorAll('.js-continue-import-save-anyway').forEach((button) => {
+    button.addEventListener('click', () => {
+      continueImportSaveAfterDuplicateWarning();
+    });
+  });
+
+  document.querySelectorAll('.js-cancel-import-duplicate-warning').forEach((button) => {
+    button.addEventListener('click', () => {
+      dismissImportDuplicateWarning();
+      renderViews();
+      updateImportSaveButtonState();
     });
   });
 
