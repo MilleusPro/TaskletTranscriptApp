@@ -2069,6 +2069,126 @@ textarea:disabled {
   border: 0;
 }
 
+.partner-brief-shell {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.partner-brief-heading {
+  align-items: flex-start;
+}
+
+.partner-brief-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.partner-brief-controls .sort-select {
+  min-width: 170px;
+}
+
+.partner-brief-section {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+.partner-brief-section:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.partner-brief-section h4 {
+  font-size: 18px;
+}
+
+.partner-brief-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.partner-brief-section-heading h4 {
+  margin: 0;
+}
+
+.partner-brief-subsection {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.partner-brief-subsection h5 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--text-muted);
+}
+
+.partner-brief-meeting-list,
+.partner-brief-case-list,
+.partner-brief-question-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.partner-brief-meeting-row,
+.partner-brief-case-card,
+.partner-brief-question-group {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fcfefd;
+}
+
+.partner-brief-card--partner {
+  border-left: 4px solid #8cb4df;
+  background: #f7fbff;
+}
+
+.partner-brief-card--customer {
+  border-left: 4px solid #e2c16e;
+  background: #fffdf6;
+}
+
+.partner-brief-table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+}
+
+.partner-brief-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+}
+
+.partner-brief-table th,
+.partner-brief-table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  font-size: 14px;
+}
+
+.partner-brief-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f3f8f6;
+  color: var(--text-primary);
+}
+
+.partner-brief-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
 @media (max-width: 1240px) {
   .main-content {
     padding: var(--space-6) var(--space-5) var(--space-7);
@@ -2258,6 +2378,24 @@ textarea:disabled {
   .entity-grid--participants {
     grid-template-columns: 1fr;
   }
+
+  .partner-brief-controls .secondary-button,
+  .partner-brief-controls .sort-select {
+    width: 100%;
+  }
+
+  .partner-brief-section-heading {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .partner-brief-section-heading .secondary-button {
+    width: 100%;
+  }
+
+  .partner-brief-table {
+    min-width: 640px;
+  }
 }
 
 @media (max-width: 520px) {
@@ -2292,5 +2430,52 @@ textarea:disabled {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+@media print {
+  body.print-partner-brief .sidebar,
+  body.print-partner-brief .topbar,
+  body.print-partner-brief .entity-account-panel,
+  body.print-partner-brief .partner-brief-controls,
+  body.print-partner-brief .js-copy-partner-brief-section,
+  body.print-partner-brief .search-results-panel,
+  body.print-partner-brief .action-command-center,
+  body.print-partner-brief .panel-card:not(.partner-brief-shell) {
+    display: none !important;
+  }
+
+  body.print-partner-brief {
+    background: #fff;
+  }
+
+  body.print-partner-brief .app {
+    display: block;
+    min-height: auto;
+  }
+
+  body.print-partner-brief .main-content {
+    padding: 0;
+  }
+
+  body.print-partner-brief .partner-brief-shell {
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+    background: #fff;
+  }
+
+  body.print-partner-brief .partner-brief-table-wrap {
+    overflow: visible;
+  }
+
+  body.print-partner-brief .partner-brief-table {
+    min-width: 0;
+  }
+
+  body.print-partner-brief .partner-brief-table th,
+  body.print-partner-brief .partner-brief-table td {
+    font-size: 12px;
+    padding: 6px 8px;
   }
 }

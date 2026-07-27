@@ -2764,6 +2764,8 @@ const state = {
   meetingEditError: '',
   selectedCustomerKey: null,
   selectedPartnerKey: null,
+  partnerStatusBriefOpen: false,
+  partnerStatusBriefStartDate: '',
   selectedParticipantKey: null,
   meetingReturnContext: null,
   actionFilter: 'Active',
@@ -2827,6 +2829,677 @@ const state = {
   meetingDocumentDownloadError: '',
   meetingDeletionWarning: ''
 };
+
+function getDateMonthsAgoString(monthCount) {
+  const months = Number.isFinite(Number(monthCount)) ? Math.max(0, Math.trunc(Number(monthCount))) : 0;
+  const currentDate = new Date();
+  const targetDate = new Date(currentDate);
+  targetDate.setHours(0, 0, 0, 0);
+  targetDate.setMonth(targetDate.getMonth() - months);
+  const year = targetDate.getFullYear();
+  const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+  const day = String(targetDate.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getDefaultPartnerStatusBriefStartDate() {
+  return getDateMonthsAgoString(6);
+}
+
+function getValidPartnerBriefStartDate(value) {
+  const normalized = normalizeExtractedDate(value || '');
+  if (normalized) {
+    return normalized;
+  }
+
+  return getDefaultPartnerStatusBriefStartDate();
+}
+
+function getPartnerBriefCustomerLabel(value) {
+  const normalized = cleanupEntityDisplayName(value || '');
+  return normalized || 'General partner topics';
+}
+
+function isMeetingInsideDateRange(meeting, startDate, endDate) {
+  if (!meeting || !meeting.date) {
+    return false;
+  }
+
+  return meeting.date >= startDate && meeting.date <= endDate;
+}
+
+function getPartnerBriefActionDueSortRank(action) {
+  if (isActionOverdue(action)) {
+    return 0;
+  }
+
+  if (action.dueDate === getTodayDateString()) {
+    return 1;
+  }
+
+  if (action.dueDate) {
+    return 2;
+  }
+
+  return 3;
+}
+
+function sortPartnerBriefActions(actions) {
+  return [...actions].sort((first, second) => {
+    const firstRank = getPartnerBriefActionDueSortRank(first);
+    const secondRank = getPartnerBriefActionDueSortRank(second);
+    if (firstRank !== secondRank) {
+      return firstRank - secondRank;
+    }
+
+    if (first.dueDate && second.dueDate && first.dueDate !== second.dueDate) {
+      return first.dueDate.localeCompare(second.dueDate);
+    }
+
+    const firstSourceDate = first.sourceMeetingDate || '';
+    const secondSourceDate = second.sourceMeetingDate || '';
+    if (firstSourceDate !== secondSourceDate) {
+      return secondSourceDate.localeCompare(firstSourceDate);
+    }
+
+    return String(first.description || '').localeCompare(String(second.description || ''));
+  });
+}
+
+function getPartnerBriefMeetingSummary(meeting) {
+  const summaryItems = getMeetingSectionItems(meeting, 'summary');
+  if (summaryItems.length) {
+    const text = summaryItems.join(' ');
+    return text.length > 220 ? `${text.slice(0, 220)}...` : text;
+  }
+
+  const subject = normalizeCompanyName(meeting.subject || '');
+  if (!subject) {
+    return '';
+  }
+
+  return subject.length > 220 ? `${subject.slice(0, 220)}...` : subject;
+}
+
+function getPartnerBriefKeyContacts(partnerMeetings) {
+  const contactsByKey = new Map();
+
+  partnerMeetings.forEach((meeting) => {
+    extractParticipantRecordsFromMeeting(meeting).forEach((participant) => {
+      const participantName = normalizeCompanyName(participant && participant.name);
+      if (!participantName) {
+        return;
+      }
+
+      const company = normalizeCompanyName(participant && participant.company);
+      const key = getNameGroupingKey(participantName);
+      if (!contactsByKey.has(key)) {
+        contactsByKey.set(key, {
+          name: participantName,
+          company,
+          meetingsCount: 0
+        });
+      }
+
+      const existing = contactsByKey.get(key);
+      if (!existing.company && company) {
+        existing.company = company;
+      }
+      existing.meetingsCount += 1;
+    });
+  });
+
+  return Array.from(contactsByKey.values())
+    .sort((first, second) => {
+      if (first.meetingsCount !== second.meetingsCount) {
+        return second.meetingsCount - first.meetingsCount;
+      }
+
+      return first.name.localeCompare(second.name);
+    });
+}
+
+function buildPartnerStatusBrief(selectedPartner, startDateValue) {
+  const today = getTodayDateString();
+  const startDate = getValidPartnerBriefStartDate(startDateValue);
+  const partnerMeetings = Array.isArray(selectedPartner && selectedPartner.meetings)
+    ? [...selectedPartner.meetings].sort(compareMeetingsNewestFirst)
+    : [];
+  const partnerMeetingIds = new Set(partnerMeetings.map((meeting) => meeting && meeting.id).filter(Boolean));
+  const meetingsInPeriod = partnerMeetings.filter((meeting) => isMeetingInsideDateRange(meeting, startDate, today));
+  const groupedActions = getCombinedActions().filter((action) => action && partnerMeetingIds.has(action.sourceMeetingId));
+  const nonCancelledActions = groupedActions.filter((action) => action.status !== 'Cancelled');
+  const activeActions = nonCancelledActions.filter((action) => action.status !== 'Completed');
+  const completedActions = nonCancelledActions.filter((action) => action.status === 'Completed' && action.sourceMeetingDate >= startDate && action.sourceMeetingDate <= today);
+  const activeActionsSorted = sortPartnerBriefActions(activeActions);
+  const completedActionsSorted = [...completedActions].sort((first, second) => {
+    const firstDate = first.sourceMeetingDate || '';
+    const secondDate = second.sourceMeetingDate || '';
+    if (firstDate !== secondDate) {
+      return secondDate.localeCompare(firstDate);
+    }
+    return String(first.description || '').localeCompare(String(second.description || ''));
+  });
+
+  const actionGroupsByResponsibility = {
+    tasklet: [],
+    partner: [],
+    customer: [],
+    unassigned: []
+  };
+
+  activeActionsSorted.forEach((action) => {
+    const responsibility = getActionDisplayedResponsibility(action);
+    if (Object.prototype.hasOwnProperty.call(actionGroupsByResponsibility, responsibility)) {
+      actionGroupsByResponsibility[responsibility].push(action);
+    } else {
+      actionGroupsByResponsibility.unassigned.push(action);
+    }
+  });
+
+  const customerCasesByKey = new Map();
+  meetingsInPeriod.forEach((meeting) => {
+    const label = getPartnerBriefCustomerLabel(getMeetingDisplayCustomer(meeting));
+    if (!customerCasesByKey.has(label)) {
+      customerCasesByKey.set(label, {
+        customer: label,
+        meetings: [],
+        latestMeeting: null,
+        openQuestions: []
+      });
+    }
+
+    const group = customerCasesByKey.get(label);
+    group.meetings.push(meeting);
+    if (!group.latestMeeting || getMeetingTimestamp(meeting) > getMeetingTimestamp(group.latestMeeting)) {
+      group.latestMeeting = meeting;
+    }
+
+    const meetingQuestions = getMeetingSectionItems(meeting, 'openQuestions');
+    meetingQuestions.forEach((question) => {
+      const normalizedQuestion = normalizeCompanyName(question);
+      if (normalizedQuestion) {
+        group.openQuestions.push(normalizedQuestion);
+      }
+    });
+  });
+
+  const activeActionsByCustomer = activeActionsSorted.reduce((accumulator, action) => {
+    const customerLabel = getPartnerBriefCustomerLabel(getCleanActionCustomerLabel(action));
+    if (!accumulator.has(customerLabel)) {
+      accumulator.set(customerLabel, []);
+    }
+    accumulator.get(customerLabel).push(action);
+    return accumulator;
+  }, new Map());
+
+  activeActionsByCustomer.forEach((actionsForCustomer, customerLabel) => {
+    if (!customerCasesByKey.has(customerLabel)) {
+      customerCasesByKey.set(customerLabel, {
+        customer: customerLabel,
+        meetings: [],
+        latestMeeting: null,
+        openQuestions: []
+      });
+    }
+
+    const group = customerCasesByKey.get(customerLabel);
+    group.activeActions = sortPartnerBriefActions(actionsForCustomer);
+  });
+
+  const customerCases = Array.from(customerCasesByKey.values())
+    .map((group) => {
+      const deduplicatedQuestions = Array.from(new Set((group.openQuestions || []).filter(Boolean)));
+      const latestMeeting = group.latestMeeting || null;
+      const latestDecisions = latestMeeting ? getMeetingSectionItems(latestMeeting, 'decisions') : [];
+      return {
+        customer: group.customer,
+        meetingsCount: group.meetings.length,
+        latestMeeting,
+        latestSummary: latestMeeting ? getPartnerBriefMeetingSummary(latestMeeting) : '',
+        latestDecisions,
+        activeActions: Array.isArray(group.activeActions) ? group.activeActions : [],
+        openQuestions: deduplicatedQuestions,
+        lastDiscussedDate: latestMeeting && latestMeeting.date ? latestMeeting.date : ''
+      };
+    })
+    .sort((first, second) => (second.lastDiscussedDate || '').localeCompare(first.lastDiscussedDate || ''));
+
+  const openQuestionsByCustomer = customerCases
+    .filter((caseItem) => caseItem.openQuestions.length)
+    .map((caseItem) => ({
+      customer: caseItem.customer,
+      questions: caseItem.openQuestions
+    }));
+  const totalOpenQuestions = openQuestionsByCustomer.reduce((count, group) => count + group.questions.length, 0);
+
+  const allCustomerLastDiscussed = new Map();
+  partnerMeetings.forEach((meeting) => {
+    const label = getPartnerBriefCustomerLabel(getMeetingDisplayCustomer(meeting));
+    const currentDate = allCustomerLastDiscussed.get(label);
+    if (!currentDate || (meeting.date && meeting.date > currentDate)) {
+      allCustomerLastDiscussed.set(label, meeting.date || '');
+    }
+  });
+
+  const staleCustomerPoints = customerCases
+    .filter((caseItem) => caseItem.customer !== 'General partner topics' && caseItem.activeActions.length > 0)
+    .map((caseItem) => {
+      const lastDiscussed = allCustomerLastDiscussed.get(caseItem.customer) || caseItem.lastDiscussedDate || '';
+      if (!lastDiscussed) {
+        return null;
+      }
+
+      const lastDate = new Date(`${lastDiscussed}T00:00:00`).getTime();
+      const todayDate = new Date(`${today}T00:00:00`).getTime();
+      if (!Number.isFinite(lastDate) || !Number.isFinite(todayDate)) {
+        return null;
+      }
+
+      const ageDays = Math.floor((todayDate - lastDate) / (1000 * 60 * 60 * 24));
+      if (ageDays <= 90) {
+        return null;
+      }
+
+      return caseItem.customer;
+    })
+    .filter(Boolean);
+
+  const overdueActionsCount = activeActionsSorted.filter((action) => isActionOverdue(action)).length;
+  const partnerOwnedCount = actionGroupsByResponsibility.partner.length;
+  const taskletOwnedCount = actionGroupsByResponsibility.tasklet.length;
+  const unassignedOwnedCount = actionGroupsByResponsibility.unassigned.length;
+  const missingDueDatesCount = activeActionsSorted.filter((action) => !action.dueDate).length;
+
+  const suggestedDiscussionPoints = [];
+  if (overdueActionsCount > 0) {
+    suggestedDiscussionPoints.push(`Review ${overdueActionsCount} overdue action${overdueActionsCount === 1 ? '' : 's'}.`);
+  }
+  if (partnerOwnedCount > 0) {
+    suggestedDiscussionPoints.push(`Follow up on ${partnerOwnedCount} action${partnerOwnedCount === 1 ? '' : 's'} assigned to the partner.`);
+  }
+  if (taskletOwnedCount > 0) {
+    suggestedDiscussionPoints.push(`Review ${taskletOwnedCount} outstanding Tasklet commitment${taskletOwnedCount === 1 ? '' : 's'}.`);
+  }
+  if (unassignedOwnedCount > 0) {
+    suggestedDiscussionPoints.push(`Assign responsibility for ${unassignedOwnedCount} action${unassignedOwnedCount === 1 ? '' : 's'}.`);
+  }
+  if (missingDueDatesCount > 0) {
+    suggestedDiscussionPoints.push(`Agree due dates for ${missingDueDatesCount} action${missingDueDatesCount === 1 ? '' : 's'}.`);
+  }
+  if (totalOpenQuestions > 0) {
+    suggestedDiscussionPoints.push(`Resolve ${totalOpenQuestions} open question${totalOpenQuestions === 1 ? '' : 's'}.`);
+  }
+  staleCustomerPoints.forEach((customerName) => {
+    suggestedDiscussionPoints.push(`Request an update on ${customerName}.`);
+  });
+  suggestedDiscussionPoints.push('Ask whether there are any new Tasklet opportunities in the partner\'s pipeline.');
+
+  const suggestedAgenda = [
+    {
+      title: 'Review commitments from previous meetings',
+      visible: completedActionsSorted.length > 0 || activeActionsSorted.length > 0
+    },
+    {
+      title: 'Review active customer opportunities',
+      visible: customerCases.some((caseItem) => caseItem.customer !== 'General partner topics')
+    },
+    {
+      title: 'Follow up on outstanding actions',
+      visible: activeActionsSorted.length > 0
+    },
+    {
+      title: 'Discuss stalled or inactive opportunities',
+      visible: staleCustomerPoints.length > 0
+    },
+    {
+      title: 'Resolve open questions and blockers',
+      visible: totalOpenQuestions > 0
+    },
+    {
+      title: 'Discuss new prospects',
+      visible: true
+    },
+    {
+      title: 'Agree actions, owners, and due dates',
+      visible: true
+    },
+    {
+      title: 'Agree next follow-up date',
+      visible: true
+    }
+  ].filter((item) => item.visible);
+
+  const latestMeetingDate = partnerMeetings.length && partnerMeetings[0].date ? partnerMeetings[0].date : '';
+
+  return {
+    partnerName: selectedPartner.displayName || selectedPartner.name,
+    startDate,
+    endDate: today,
+    generatedAt: today,
+    latestMeetingDate,
+    meetingsInPeriod,
+    keyContacts: getPartnerBriefKeyContacts(partnerMeetings),
+    customerCases,
+    activeActionsSorted,
+    actionGroupsByResponsibility,
+    completedActionsSorted,
+    openQuestionsByCustomer,
+    totalOpenQuestions,
+    suggestedDiscussionPoints,
+    suggestedAgenda
+  };
+}
+
+function renderPartnerBriefActionList(actions) {
+  if (!actions.length) {
+    return '<p class="entity-meta">No actions.</p>';
+  }
+
+  const rows = actions.map((action) => {
+    const customerLabel = getPartnerBriefCustomerLabel(getCleanActionCustomerLabel(action));
+    const dueDateLabel = action.dueDate ? formatDate(action.dueDate) : 'No due date';
+    const dueState = isActionOverdue(action)
+      ? '<span class="status-pill status-pill--overdue">Overdue</span>'
+      : (action.dueDate === getTodayDateString() ? '<span class="status-pill status-pill--waiting-customer">Due today</span>' : '');
+
+    return `
+      <tr>
+        <td>${escapeHtml(action.description || '')}</td>
+        <td>${escapeHtml(customerLabel)}</td>
+        <td>${escapeHtml(getActionStatusLabel(action))}</td>
+        <td>${escapeHtml(dueDateLabel)} ${dueState}</td>
+        <td>${escapeHtml(action.sourceMeetingTitle || 'Unknown meeting')}</td>
+        <td>${escapeHtml(action.sourceMeetingDate ? formatDate(action.sourceMeetingDate) : 'Date not available')}</td>
+      </tr>
+    `;
+  }).join('');
+
+  return `
+    <div class="partner-brief-table-wrap">
+      <table class="partner-brief-table">
+        <thead>
+          <tr>
+            <th>Action</th>
+            <th>Customer</th>
+            <th>Status</th>
+            <th>Due date</th>
+            <th>Source meeting</th>
+            <th>Source date</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderPartnerStatusBrief(selectedPartner) {
+  const startDate = getValidPartnerBriefStartDate(state.partnerStatusBriefStartDate);
+  const brief = buildPartnerStatusBrief(selectedPartner, startDate);
+  const responsibilityOrder = ['tasklet', 'partner', 'customer', 'unassigned'];
+  const meetingsRows = brief.meetingsInPeriod.length
+    ? brief.meetingsInPeriod.map((meeting) => {
+      const decisions = getMeetingSectionItems(meeting, 'decisions').slice(0, 3);
+      const decisionsText = decisions.length ? decisions.join(' | ') : '';
+      const hasCustomer = getMeetingDisplayCustomer(meeting) && getMeetingDisplayCustomer(meeting) !== 'Unassigned';
+      const toneClass = hasCustomer ? 'partner-brief-card--customer' : 'partner-brief-card--partner';
+      return `
+        <article class="partner-brief-meeting-row ${toneClass}">
+          <p class="entity-history-meta">${escapeHtml(meeting.date ? formatDate(meeting.date) : 'Date not available')}</p>
+          <h4>${escapeHtml(meeting.title || 'Untitled meeting')}</h4>
+          ${getMeetingDisplayCustomer(meeting) && getMeetingDisplayCustomer(meeting) !== 'Unassigned' ? `<p class="entity-meta"><strong>Customer:</strong> ${escapeHtml(getPartnerBriefCustomerLabel(getMeetingDisplayCustomer(meeting)))}</p>` : ''}
+          ${getPartnerBriefMeetingSummary(meeting) ? `<p class="entity-meta"><strong>Summary:</strong> ${escapeHtml(getPartnerBriefMeetingSummary(meeting))}</p>` : ''}
+          ${decisionsText ? `<p class="entity-meta"><strong>Important decisions:</strong> ${escapeHtml(decisionsText)}</p>` : ''}
+        </article>
+      `;
+    }).join('')
+    : renderEmptyState('No meetings found in the selected period', 'Adjust the start date or import additional partner meetings.');
+
+  const customerCasesRows = brief.customerCases.length
+    ? brief.customerCases.map((caseItem) => {
+      const latestMeetingLabel = caseItem.latestMeeting
+        ? `${caseItem.latestMeeting.date ? formatDate(caseItem.latestMeeting.date) : 'Date not available'} · ${caseItem.latestMeeting.title || 'Untitled meeting'}`
+        : 'No meeting in selected period';
+      const decisionsPreview = caseItem.latestDecisions.slice(0, 3);
+      const activeActionsPreview = caseItem.activeActions.slice(0, 4);
+      const questionsPreview = caseItem.openQuestions.slice(0, 4);
+
+      return `
+        <article class="partner-brief-case-card partner-brief-card--customer">
+          <h4>${escapeHtml(caseItem.customer)}</h4>
+          <p class="entity-meta"><strong>Date last discussed:</strong> ${escapeHtml(caseItem.lastDiscussedDate ? formatDate(caseItem.lastDiscussedDate) : 'Date not available')}</p>
+          <p class="entity-meta"><strong>Latest meeting:</strong> ${escapeHtml(latestMeetingLabel)}</p>
+          ${caseItem.latestSummary ? `<p class="entity-meta"><strong>Latest summary:</strong> ${escapeHtml(caseItem.latestSummary)}</p>` : ''}
+          ${decisionsPreview.length ? `<p class="entity-meta"><strong>Latest decisions:</strong> ${escapeHtml(decisionsPreview.join(' | '))}</p>` : ''}
+          <p class="entity-meta"><strong>Active actions:</strong> ${activeActionsPreview.length ? escapeHtml(activeActionsPreview.map((action) => action.description).join(' | ')) : 'No active actions'}</p>
+          <p class="entity-meta"><strong>Open questions:</strong> ${questionsPreview.length ? escapeHtml(questionsPreview.join(' | ')) : 'No open questions'}</p>
+        </article>
+      `;
+    }).join('')
+    : renderEmptyState('No customer cases in this period', 'No meetings or active actions are linked to customers for this partner in the selected range.');
+
+  const completedActionRows = brief.completedActionsSorted.length
+    ? brief.completedActionsSorted.map((action) => `
+      <tr>
+        <td>${escapeHtml(action.description || '')}</td>
+        <td>${escapeHtml(getActionOwnershipCategoryLabel(getActionDisplayedResponsibility(action)))}</td>
+        <td>${escapeHtml(getPartnerBriefCustomerLabel(getCleanActionCustomerLabel(action)))}</td>
+        <td>${escapeHtml(action.sourceMeetingTitle || 'Unknown meeting')}</td>
+        <td>${escapeHtml(action.sourceMeetingDate ? formatDate(action.sourceMeetingDate) : 'Date not available')}</td>
+      </tr>
+    `).join('')
+    : '';
+
+  const completedActionsMarkup = brief.completedActionsSorted.length
+    ? `
+      <div class="partner-brief-table-wrap">
+        <table class="partner-brief-table">
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th>Responsibility</th>
+              <th>Customer</th>
+              <th>Source meeting</th>
+              <th>Source date</th>
+            </tr>
+          </thead>
+          <tbody>${completedActionRows}</tbody>
+        </table>
+      </div>
+    `
+    : renderEmptyState('No completed actions in the selected period', 'Completed actions will appear here when their source meeting falls inside this reporting range.');
+
+  const openQuestionsMarkup = brief.openQuestionsByCustomer.length
+    ? brief.openQuestionsByCustomer.map((group) => `
+      <article class="partner-brief-question-group">
+        <h4>${escapeHtml(group.customer)}</h4>
+        <ul class="viewer-list">
+          ${group.questions.map((question) => `<li>${escapeHtml(question)}</li>`).join('')}
+        </ul>
+      </article>
+    `).join('')
+    : renderEmptyState('No open questions', 'No open questions were captured for this partner in the selected period.');
+
+  return `
+    <section class="panel-card partner-brief-shell">
+      <div class="section-heading partner-brief-heading">
+        <div>
+          <p class="eyebrow">Partner status preparation</p>
+          <h3>${escapeHtml(brief.partnerName || selectedPartner.name || 'Partner')}</h3>
+        </div>
+        <div class="sort-controls partner-brief-controls">
+          <label class="sort-label" for="partner-brief-start-date">Start date</label>
+          <input id="partner-brief-start-date" class="sort-select js-partner-brief-start-date" type="date" value="${escapeHtml(brief.startDate)}" max="${escapeHtml(brief.endDate)}">
+          <button class="secondary-button js-regenerate-partner-brief" type="button">Refresh brief</button>
+          <button class="secondary-button js-print-partner-brief" type="button">Print</button>
+          <button class="secondary-button js-close-partner-brief" type="button">Back</button>
+        </div>
+      </div>
+
+      <section class="partner-brief-section">
+        <div class="partner-brief-section-heading">
+          <h4>1. Partner overview</h4>
+          <button class="secondary-button secondary-button--compact js-copy-partner-brief-section" type="button" data-section-copy-label="Partner overview">Copy section</button>
+        </div>
+        <div class="viewer-meta-grid">
+          <div>
+            <strong>Partner name</strong>
+            <span>${escapeHtml(brief.partnerName || '')}</span>
+          </div>
+          ${brief.keyContacts.length ? `<div><strong>Known partner contacts/participants</strong><span>${escapeHtml(brief.keyContacts.map((contact) => (contact.company ? `${contact.name} (${contact.company})` : contact.name)).join(', '))}</span></div>` : ''}
+          ${brief.latestMeetingDate ? `<div><strong>Latest recorded meeting</strong><span>${escapeHtml(formatDate(brief.latestMeetingDate))}</span></div>` : ''}
+          <div>
+            <strong>Meetings in selected period</strong>
+            <span>${brief.meetingsInPeriod.length}</span>
+          </div>
+          <div>
+            <strong>Date generated</strong>
+            <span>${escapeHtml(formatDate(brief.generatedAt))}</span>
+          </div>
+          <div>
+            <strong>Reporting period</strong>
+            <span>${escapeHtml(formatDate(brief.startDate))} to ${escapeHtml(formatDate(brief.endDate))}</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="partner-brief-section">
+        <div class="partner-brief-section-heading">
+          <h4>2. Recent meeting activity</h4>
+          <button class="secondary-button secondary-button--compact js-copy-partner-brief-section" type="button" data-section-copy-label="Recent meeting activity">Copy section</button>
+        </div>
+        <div class="partner-brief-meeting-list">${meetingsRows}</div>
+      </section>
+
+      <section class="partner-brief-section">
+        <div class="partner-brief-section-heading">
+          <h4>3. Active customer cases</h4>
+          <button class="secondary-button secondary-button--compact js-copy-partner-brief-section" type="button" data-section-copy-label="Active customer cases">Copy section</button>
+        </div>
+        <div class="partner-brief-case-list">${customerCasesRows}</div>
+      </section>
+
+      <section class="partner-brief-section">
+        <div class="partner-brief-section-heading">
+          <h4>4. Outstanding actions</h4>
+          <button class="secondary-button secondary-button--compact js-copy-partner-brief-section" type="button" data-section-copy-label="Outstanding actions">Copy section</button>
+        </div>
+        ${responsibilityOrder.map((responsibilityKey) => {
+          const groupActions = brief.actionGroupsByResponsibility[responsibilityKey] || [];
+          return `
+            <div class="partner-brief-subsection">
+              <h5>${escapeHtml(getActionOwnershipCategoryLabel(responsibilityKey))}</h5>
+              ${groupActions.length ? renderPartnerBriefActionList(groupActions) : '<p class="entity-meta">No active actions.</p>'}
+            </div>
+          `;
+        }).join('')}
+      </section>
+
+      <section class="partner-brief-section">
+        <div class="partner-brief-section-heading">
+          <h4>5. Completed actions during the selected period</h4>
+          <button class="secondary-button secondary-button--compact js-copy-partner-brief-section" type="button" data-section-copy-label="Completed actions during the selected period">Copy section</button>
+        </div>
+        ${completedActionsMarkup}
+      </section>
+
+      <section class="partner-brief-section">
+        <div class="partner-brief-section-heading">
+          <h4>6. Open questions</h4>
+          <button class="secondary-button secondary-button--compact js-copy-partner-brief-section" type="button" data-section-copy-label="Open questions">Copy section</button>
+        </div>
+        <div class="partner-brief-question-list">${openQuestionsMarkup}</div>
+      </section>
+
+      <section class="partner-brief-section">
+        <div class="partner-brief-section-heading">
+          <h4>7. Suggested discussion points</h4>
+          <button class="secondary-button secondary-button--compact js-copy-partner-brief-section" type="button" data-section-copy-label="Suggested discussion points">Copy section</button>
+        </div>
+        <ul class="viewer-list">
+          ${brief.suggestedDiscussionPoints.map((point) => `<li>${escapeHtml(point)}</li>`).join('')}
+        </ul>
+      </section>
+
+      <section class="partner-brief-section">
+        <div class="partner-brief-section-heading">
+          <h4>8. Suggested agenda</h4>
+          <button class="secondary-button secondary-button--compact js-copy-partner-brief-section" type="button" data-section-copy-label="Suggested agenda">Copy section</button>
+        </div>
+        <ol class="viewer-list">
+          ${brief.suggestedAgenda.map((item) => `<li>${escapeHtml(item.title)}</li>`).join('')}
+        </ol>
+      </section>
+    </section>
+  `;
+}
+
+function openPartnerStatusBrief() {
+  state.partnerStatusBriefOpen = true;
+  state.partnerStatusBriefStartDate = getValidPartnerBriefStartDate(state.partnerStatusBriefStartDate);
+  renderViews();
+}
+
+function closePartnerStatusBrief() {
+  state.partnerStatusBriefOpen = false;
+  renderViews();
+}
+
+function printPartnerStatusBrief() {
+  if (typeof window === 'undefined') {
+    return;
+  }
+
+  const body = document.body;
+  if (body) {
+    body.classList.add('print-partner-brief');
+  }
+  window.print();
+  if (body) {
+    body.classList.remove('print-partner-brief');
+  }
+}
+
+async function copyTextToClipboard(text) {
+  const normalizedText = String(text || '').trim();
+  if (!normalizedText) {
+    return false;
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(normalizedText);
+      return true;
+    } catch (error) {
+      // Fall back to execCommand when clipboard permissions are unavailable.
+    }
+  }
+
+  if (typeof document === 'undefined' || !document.body) {
+    return false;
+  }
+
+  const textArea = document.createElement('textarea');
+  textArea.value = normalizedText;
+  textArea.setAttribute('readonly', 'readonly');
+  textArea.style.position = 'fixed';
+  textArea.style.left = '-9999px';
+  textArea.style.top = '0';
+  document.body.appendChild(textArea);
+  textArea.focus();
+  textArea.select();
+
+  let copied = false;
+  try {
+    copied = document.execCommand('copy');
+  } catch (error) {
+    copied = false;
+  }
+
+  document.body.removeChild(textArea);
+  return copied;
+}
 
 function normalizeActionResponsibilityValue(value) {
   const normalized = normalizeCompanyName(value).toLowerCase();
@@ -3258,6 +3931,7 @@ function openSearchResult(result) {
     state.meetingEditMode = false;
     state.meetingEditDraft = null;
     state.meetingEditError = '';
+    state.partnerStatusBriefOpen = false;
     state.activeViewerTab = 'overview';
     renderViews();
     return;
@@ -3270,6 +3944,7 @@ function openSearchResult(result) {
     state.activeSection = 'customers';
     state.selectedCustomerKey = result.id;
     state.selectedPartnerKey = null;
+    state.partnerStatusBriefOpen = false;
     state.selectedParticipantKey = null;
     state.meetingEditMode = false;
     state.meetingEditDraft = null;
@@ -3281,6 +3956,8 @@ function openSearchResult(result) {
   if (result.type === 'partner') {
     state.activeSection = 'partners';
     state.selectedPartnerKey = result.id;
+    state.partnerStatusBriefOpen = false;
+    state.partnerStatusBriefStartDate = getDefaultPartnerStatusBriefStartDate();
     state.selectedCustomerKey = null;
     state.selectedParticipantKey = null;
     state.meetingEditMode = false;
@@ -3295,6 +3972,7 @@ function openSearchResult(result) {
     state.selectedParticipantKey = result.id;
     state.selectedCustomerKey = null;
     state.selectedPartnerKey = null;
+    state.partnerStatusBriefOpen = false;
     state.meetingEditMode = false;
     state.meetingEditDraft = null;
     state.meetingEditError = '';
@@ -3308,6 +3986,7 @@ function openSearchResult(result) {
     state.searchHighlightedActionId = result.id;
     state.selectedCustomerKey = null;
     state.selectedPartnerKey = null;
+    state.partnerStatusBriefOpen = false;
     state.selectedParticipantKey = null;
     state.meetingEditMode = false;
     state.meetingEditDraft = null;
@@ -3330,6 +4009,7 @@ function init() {
       state.meetingEditError = '';
       state.selectedCustomerKey = null;
       state.selectedPartnerKey = null;
+      state.partnerStatusBriefOpen = false;
       state.selectedParticipantKey = null;
       state.meetingReturnContext = null;
       state.searchResultsOpen = false;
@@ -5627,6 +6307,9 @@ function renderEntityDetailHeader(entityType, selectedEntity) {
   const relatedLabel = isCustomer ? 'Related partners' : 'Related customers';
   const relatedNames = selectedEntity.relatedNames.length ? selectedEntity.relatedNames : ['None captured'];
   const latestMeetingDate = selectedEntity.latestMeetingDate ? formatDate(selectedEntity.latestMeetingDate) : 'Date not available';
+  const partnerBriefButton = !isCustomer
+    ? '<button class="secondary-button js-open-partner-status-brief" type="button">Prepare Status Meeting</button>'
+    : '';
 
   return `
     <section class="panel-card entity-account-panel">
@@ -5635,7 +6318,10 @@ function renderEntityDetailHeader(entityType, selectedEntity) {
           <p class="eyebrow">${isCustomer ? 'Customer detail' : 'Partner detail'}</p>
           <h3>${escapeHtml(selectedEntity.displayName || selectedEntity.name)}</h3>
         </div>
-        <button class="secondary-button ${isCustomer ? 'js-back-to-customers' : 'js-back-to-partners'}" type="button">← Return to ${isCustomer ? 'customers' : 'partners'}</button>
+        <div class="sort-controls">
+          ${partnerBriefButton}
+          <button class="secondary-button ${isCustomer ? 'js-back-to-customers' : 'js-back-to-partners'}" type="button">← Return to ${isCustomer ? 'customers' : 'partners'}</button>
+        </div>
       </div>
       <div class="entity-account-meta" role="list" aria-label="Account summary">
         <span class="entity-chip" role="listitem"><strong>Total meetings</strong>${selectedEntity.meetings.length}</span>
@@ -6190,7 +6876,15 @@ function renderPartners() {
     const selectedPartner = getPartnerGroupByKey(state.selectedPartnerKey);
     if (!selectedPartner) {
       state.selectedPartnerKey = null;
+      state.partnerStatusBriefOpen = false;
       return renderPartners();
+    }
+
+    if (state.partnerStatusBriefOpen) {
+      return [
+        renderEntityDetailHeader('partner', selectedPartner),
+        renderPartnerStatusBrief(selectedPartner)
+      ].join('');
     }
 
     return [
@@ -8111,6 +8805,8 @@ function attachInteractions() {
     button.addEventListener('click', () => {
       state.activeSection = 'partners';
       state.selectedPartnerKey = button.dataset.partnerKey || null;
+      state.partnerStatusBriefOpen = false;
+      state.partnerStatusBriefStartDate = getDefaultPartnerStatusBriefStartDate();
       state.selectedCustomerKey = null;
       state.selectedParticipantKey = null;
       state.selectedMeetingId = null;
@@ -8292,7 +8988,65 @@ function attachInteractions() {
   document.querySelectorAll('.js-back-to-partners').forEach((button) => {
     button.addEventListener('click', () => {
       state.selectedPartnerKey = null;
+      state.partnerStatusBriefOpen = false;
       renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-open-partner-status-brief').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.partnerStatusBriefStartDate = getValidPartnerBriefStartDate(state.partnerStatusBriefStartDate);
+      openPartnerStatusBrief();
+    });
+  });
+
+  document.querySelectorAll('.js-close-partner-brief').forEach((button) => {
+    button.addEventListener('click', () => {
+      closePartnerStatusBrief();
+    });
+  });
+
+  document.querySelectorAll('.js-regenerate-partner-brief').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.partnerStatusBriefStartDate = getValidPartnerBriefStartDate(state.partnerStatusBriefStartDate);
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-partner-brief-start-date').forEach((input) => {
+    input.addEventListener('change', () => {
+      state.partnerStatusBriefStartDate = getValidPartnerBriefStartDate(input.value);
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-print-partner-brief').forEach((button) => {
+    button.addEventListener('click', () => {
+      printPartnerStatusBrief();
+    });
+  });
+
+  document.querySelectorAll('.js-copy-partner-brief-section').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const sectionElement = button.closest('.partner-brief-section');
+      if (!sectionElement) {
+        return;
+      }
+
+      const copiedText = sectionElement.innerText
+        .replace(/\n?\s*Copy section\s*\n?/gi, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      const copied = await copyTextToClipboard(copiedText);
+      const originalLabel = button.textContent || 'Copy section';
+
+      button.textContent = copied ? 'Copied' : 'Copy failed';
+      button.disabled = true;
+
+      window.setTimeout(() => {
+        button.textContent = originalLabel;
+        button.disabled = false;
+      }, 1200);
     });
   });
 
