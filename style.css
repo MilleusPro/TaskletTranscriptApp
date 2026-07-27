@@ -814,7 +814,8 @@ textarea:disabled {
 .tag,
 .badge,
 .status-pill,
-.meeting-status {
+.meeting-status,
+.review-status-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -822,11 +823,6 @@ textarea:disabled {
   padding: 4px 10px;
   border-radius: 999px;
   border: 1px solid transparent;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.1;
-  white-space: nowrap;
-}
 
 .partner-tag {
   color: #2f5e48;
@@ -858,6 +854,24 @@ textarea:disabled {
   border-color: #cdebd8;
 }
 
+.review-status-badge {
+  color: #6d5517;
+  background: #fff4de;
+  border-color: #efd4a0;
+}
+
+.review-status-badge--reviewed {
+  color: #1f6440;
+  background: #e9f8ef;
+  border-color: #caecd7;
+}
+
+.review-status-badge--needs-correction {
+  color: #7e2f2d;
+  background: #ffe8e7;
+  border-color: #efb6b5;
+}
+
 .status-pill {
   color: #2f4968;
   background: #eef3f8;
@@ -884,6 +898,142 @@ textarea:disabled {
 }
 
 .status-pill--completed {
+  color: #1f6440;
+  background: #e9f8ef;
+  border-color: #caecd7;
+}
+
+.status-pill--cancelled {
+  color: #7f3b3a;
+  background: #fdeeee;
+  border-color: #f1c8c8;
+}
+
+.status-pill--overdue {
+  color: #7e2f2d;
+  background: #ffe8e7;
+  border-color: #efb6b5;
+}
+
+.meeting-card-badges {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.dashboard-review-panel {
+  margin-bottom: var(--space-5);
+}
+
+.dashboard-review-heading {
+  margin-bottom: var(--space-3);
+}
+
+.dashboard-review-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.dashboard-review-card {
+  display: grid;
+  gap: 6px;
+  min-height: 108px;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  text-align: left;
+  box-shadow: var(--shadow-soft);
+  transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+}
+
+.dashboard-review-card:hover {
+  transform: translateY(-1px);
+  border-color: #a5dcbc;
+  box-shadow: 0 8px 16px rgba(15, 39, 73, 0.09);
+}
+
+.dashboard-review-card:focus-visible {
+  outline: 3px solid rgba(41, 102, 255, 0.25);
+  outline-offset: 2px;
+  border-color: var(--color-blue);
+}
+
+.dashboard-review-card-title {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 620;
+}
+
+.dashboard-review-card-count {
+  color: var(--color-navy);
+  font-size: 30px;
+  line-height: 1.1;
+}
+
+.dashboard-review-card--needs-review {
+  background: #fffaf0;
+  border-color: #f0dbad;
+}
+
+.dashboard-review-card--needs-correction {
+  background: #fff7f7;
+  border-color: #efb6b5;
+}
+
+.review-queue-shell {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.review-queue-list {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.review-queue-card {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: #fff;
+}
+
+.review-queue-card-header,
+.meeting-review-panel-header,
+.meeting-review-status-row,
+.review-queue-card-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.review-queue-card-badges,
+.meeting-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.review-queue-warning-preview .viewer-list,
+.meeting-review-panel .viewer-list {
+  margin: 0;
+}
+
+.meeting-review-panel {
+  margin-top: var(--space-4);
+}
+
+.meeting-review-checks-clear {
+  margin: 0;
+  color: #1f6440;
+  font-weight: 600;
+}
   color: #1f6440;
   background: #e9f8ef;
   border-color: #caecd7;
@@ -1161,7 +1311,7 @@ textarea:disabled {
 }
 
 .action-secondary-filters--primary {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   align-items: end;
 }
 
@@ -1594,6 +1744,77 @@ textarea:disabled {
   color: #1f6d49;
   font-weight: 600;
   font-size: 14px;
+}
+
+.dashboard-attention-panel {
+  margin-bottom: var(--space-5);
+}
+
+.dashboard-attention-heading {
+  margin-bottom: var(--space-3);
+}
+
+.dashboard-attention-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.dashboard-attention-card {
+  display: grid;
+  gap: 6px;
+  min-height: 132px;
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  text-align: left;
+  box-shadow: var(--shadow-soft);
+  transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+
+.dashboard-attention-card:hover {
+  transform: translateY(-1px);
+  border-color: #a5dcbc;
+  box-shadow: 0 8px 16px rgba(15, 39, 73, 0.09);
+}
+
+.dashboard-attention-card:focus-visible {
+  outline: 3px solid rgba(41, 102, 255, 0.25);
+  outline-offset: 2px;
+  border-color: var(--color-blue);
+}
+
+.dashboard-attention-card-title {
+  color: var(--text-primary);
+  font-size: 15px;
+  font-weight: 620;
+}
+
+.dashboard-attention-card-count {
+  color: var(--color-navy);
+  font-size: 28px;
+  line-height: 1.1;
+}
+
+.dashboard-attention-card-label {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.dashboard-attention-card--overdue {
+  border-color: #efb6b5;
+  background: #fff9f9;
+}
+
+.dashboard-attention-card--dueToday {
+  border-color: #f0dbad;
+  background: #fffdf7;
+}
+
+.dashboard-attention-card--waiting {
+  border-color: #d7d1f1;
+  background: #fbfaff;
 }
 
 .viewer-content {
@@ -2212,6 +2433,14 @@ textarea:disabled {
     grid-template-columns: 1fr;
   }
 
+  .dashboard-attention-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .dashboard-review-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .viewer-meta-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2287,6 +2516,14 @@ textarea:disabled {
     align-self: flex-start;
   }
 
+  .dashboard-attention-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard-review-grid {
+    grid-template-columns: 1fr;
+  }
+
   .topbar-actions,
   .search-field,
   .primary-button,
@@ -2324,6 +2561,12 @@ textarea:disabled {
     width: 100%;
   }
 
+  .meeting-card-badges,
+  .review-queue-card-badges,
+  .meeting-review-actions {
+    justify-content: flex-start;
+  }
+
   .action-card-heading-row,
   .action-compact-title-row {
     flex-direction: column;
@@ -2333,6 +2576,18 @@ textarea:disabled {
   .action-secondary-filters,
   .action-secondary-filters--primary {
     grid-template-columns: 1fr;
+  }
+
+  .dashboard-attention-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .review-queue-card-header,
+  .meeting-review-panel-header,
+  .meeting-review-status-row,
+  .review-queue-card-actions {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .action-ownership-select {
@@ -2477,5 +2732,11 @@ textarea:disabled {
   body.print-partner-brief .partner-brief-table td {
     font-size: 12px;
     padding: 6px 8px;
+  }
+
+  .meeting-review-actions,
+  .dashboard-review-panel,
+  .review-queue-shell {
+    display: none !important;
   }
 }

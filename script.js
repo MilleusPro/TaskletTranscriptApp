@@ -29,12 +29,20 @@ const ACTION_VIEW_OPTIONS = ['compact', 'cards'];
 const ACTION_HEADLINE_TABS = ['Active', 'Overdue', 'Open', 'In Progress', 'Waiting', 'Completed', 'All'];
 const GLOBAL_ACTION_SORT_OPTIONS = ['Priority', 'Due date', 'Newest', 'Oldest', 'Customer', 'Partner'];
 const GLOBAL_ACTION_DUE_FILTER_OPTIONS = ['Any due date', 'Overdue', 'Due today', 'Due this week', 'No due date'];
+const GLOBAL_ACTION_RESPONSIBILITY_FILTER_OPTIONS = ['Any responsibility', 'Tasklet', 'Partner', 'Customer', 'Unassigned'];
+const MEETING_REVIEW_STATUS_VALUES = ['needs_review', 'reviewed', 'needs_correction'];
+const REVIEW_QUEUE_FILTER_OPTIONS = ['All pending', 'Needs review', 'Needs correction', 'Reviewed'];
 const SORT_ORDER_OPTIONS = ['newest', 'oldest'];
 const SUPPORTED_APPLICATION_SETTING_KEYS = ['sortOrder', 'actionFilter', 'actionView'];
 const APPLICATION_SETTING_LABELS = {
   sortOrder: 'Meeting sort order',
   actionFilter: 'Action filter',
   actionView: 'Action view'
+};
+const MEETING_REVIEW_STATUS_LABELS = {
+  needs_review: 'Needs review',
+  reviewed: 'Reviewed',
+  needs_correction: 'Needs correction'
 };
 const SEARCH_MIN_CHARS = 2;
 const SEARCH_DEBOUNCE_MS = 180;
@@ -78,6 +86,7 @@ const MEETING_ROW_COLUMNS = [
   'original_file_name',
   'original_file_size',
   'original_file_mime_type',
+  'review_status',
   'created_at',
   'updated_at'
 ].join(', ');
@@ -2267,6 +2276,7 @@ function normalizeMeetingRecord(meeting) {
   }
 
   const normalizedMeeting = { ...meeting };
+  normalizedMeeting.reviewStatus = normalizeMeetingReviewStatus(meeting.reviewStatus || meeting.review_status);
   normalizedMeeting.extraSections = Array.isArray(meeting.extraSections)
     ? meeting.extraSections.map(normalizeExtraSection).filter(Boolean)
     : [];
@@ -2449,6 +2459,7 @@ function mapMeetingToDatabaseRow(meeting, authenticatedUserId) {
       ? Math.trunc(Number(normalizedMeeting.originalFileSize))
       : null,
     original_file_mime_type: String(normalizedMeeting.originalFileMimeType || '').trim() || null,
+    review_status: normalizeMeetingReviewStatus(normalizedMeeting.reviewStatus),
     created_at: normalizedMeeting.createdAt || now,
     updated_at: normalizedMeeting.updatedAt || now
   };
@@ -2498,6 +2509,7 @@ function mapDatabaseRowToMeeting(row) {
     originalFileName: String(row.original_file_name || '').trim(),
     originalFileSize: Number.isFinite(Number(row.original_file_size)) ? Math.trunc(Number(row.original_file_size)) : null,
     originalFileMimeType: String(row.original_file_mime_type || '').trim(),
+    reviewStatus: normalizeMeetingReviewStatus(row.review_status),
     customer: String(row.customer || '').trim(),
     partner: String(row.partner || '').trim(),
     participants: normalizeMeetingParticipants(row.participants),
@@ -2768,11 +2780,13 @@ const state = {
   partnerStatusBriefStartDate: '',
   selectedParticipantKey: null,
   meetingReturnContext: null,
+  reviewQueueFilter: 'All pending',
   actionFilter: 'Active',
   actionView: 'compact',
   actionsCustomerFilter: 'All customers',
   actionsPartnerFilter: 'All partners',
   actionsDueDateFilter: 'Any due date',
+  actionsResponsibilityFilter: 'Any responsibility',
   actionsSortBy: 'Priority',
   actionsExpandedById: {},
   customerDetailActionFiltersByKey: {},
@@ -2825,6 +2839,8 @@ const state = {
   dataManagementLastExportAt: '',
   dataManagementSelectedBackupFile: null,
   dataManagementSelectedBackupName: '',
+  meetingReviewStatusSaving: false,
+  meetingReviewStatusError: '',
   meetingDocumentDownloadInProgressId: '',
   meetingDocumentDownloadError: '',
   meetingDeletionWarning: ''
@@ -3512,6 +3528,26 @@ function normalizeActionResponsibilityValue(value) {
     : null;
 }
 
+function normalizeMeetingReviewStatus(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return MEETING_REVIEW_STATUS_VALUES.includes(normalized) ? normalized : 'needs_review';
+}
+
+function getMeetingReviewStatusLabel(value) {
+  const normalized = normalizeMeetingReviewStatus(value);
+  return MEETING_REVIEW_STATUS_LABELS[normalized] || MEETING_REVIEW_STATUS_LABELS.needs_review;
+}
+
+function getMeetingReviewStatusClassName(value) {
+  const normalized = normalizeMeetingReviewStatus(value).replace(/_/g, '-');
+  return `review-status-badge review-status-badge--${normalized}`;
+}
+
+function renderMeetingReviewStatusBadge(value) {
+  const normalized = normalizeMeetingReviewStatus(value);
+  return `<span class="${getMeetingReviewStatusClassName(normalized)}">${escapeHtml(getMeetingReviewStatusLabel(normalized))}</span>`;
+}
+
 function isDefaultActionResponsibility(value) {
   return normalizeActionResponsibilityValue(value) === 'unassigned';
 }
@@ -3868,6 +3904,7 @@ async function deleteSavedMeeting() {
 const sectionTitles = {
   dashboard: 'Dashboard',
   meetings: 'Meetings',
+  reviewQueue: 'Review Queue',
   customers: 'Customers',
   partners: 'Partners',
   participants: 'Participants',
@@ -3876,7 +3913,7 @@ const sectionTitles = {
   import: 'Import Transcript'
 };
 
-const mainPanelIds = ['dashboard-view', 'meetings-view', 'customers-view', 'partners-view', 'participants-view', 'actions-view', 'dataManagement-view', 'import-view'];
+const mainPanelIds = ['dashboard-view', 'meetings-view', 'reviewQueue-view', 'customers-view', 'partners-view', 'participants-view', 'actions-view', 'dataManagement-view', 'import-view'];
 const viewerTabs = ['overview', 'summary', 'decisions', 'actions', 'questions', 'commercial', 'additionalSections', 'transcript'];
 
 function closeSearchResults(clearQuery = false) {
@@ -4007,6 +4044,8 @@ function init() {
       state.meetingEditMode = false;
       state.meetingEditDraft = null;
       state.meetingEditError = '';
+      state.meetingReviewStatusError = '';
+      state.meetingReviewStatusSaving = false;
       state.selectedCustomerKey = null;
       state.selectedPartnerKey = null;
       state.partnerStatusBriefOpen = false;
@@ -4176,6 +4215,7 @@ function renderViews() {
   const viewSections = {
     dashboard: document.getElementById('dashboard-view'),
     meetings: document.getElementById('meetings-view'),
+    reviewQueue: document.getElementById('reviewQueue-view'),
     customers: document.getElementById('customers-view'),
     partners: document.getElementById('partners-view'),
     participants: document.getElementById('participants-view'),
@@ -4187,6 +4227,7 @@ function renderViews() {
   if (cloudMeetingsState) {
     viewSections.dashboard.innerHTML = cloudMeetingsState;
     viewSections.meetings.innerHTML = cloudMeetingsState;
+    viewSections.reviewQueue.innerHTML = cloudMeetingsState;
     viewSections.customers.innerHTML = cloudMeetingsState;
     viewSections.partners.innerHTML = cloudMeetingsState;
     viewSections.participants.innerHTML = cloudMeetingsState;
@@ -4230,6 +4271,7 @@ function renderViews() {
     viewSections.meetings.innerHTML = renderMeetingsPage();
   }
 
+    viewSections.reviewQueue.innerHTML = renderReviewQueue();
   viewSections.customers.innerHTML = renderCustomers();
   viewSections.partners.innerHTML = renderPartners();
   viewSections.participants.innerHTML = renderParticipants();
@@ -4807,6 +4849,17 @@ function getTodayDateString() {
   return `${year}-${month}-${day}`;
 }
 
+function getDateDaysAheadString(dayCount) {
+  const normalizedCount = Number.isFinite(Number(dayCount)) ? Math.max(0, Math.trunc(Number(dayCount))) : 0;
+  const targetDate = new Date();
+  targetDate.setHours(0, 0, 0, 0);
+  targetDate.setDate(targetDate.getDate() + normalizedCount);
+  const year = targetDate.getFullYear();
+  const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+  const day = String(targetDate.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 function hashTextStable(value) {
   let hash = 2166136261;
   const text = String(value || '');
@@ -5333,26 +5386,9 @@ function getActionPriorityRank(action) {
 }
 
 function getDueThisWeekRange() {
-  const currentDate = new Date();
-  const day = currentDate.getDay();
-  const mondayOffset = day === 0 ? -6 : 1 - day;
-  const monday = new Date(currentDate);
-  monday.setHours(0, 0, 0, 0);
-  monday.setDate(currentDate.getDate() + mondayOffset);
-
-  const sunday = new Date(monday);
-  sunday.setDate(monday.getDate() + 6);
-
-  const toDateString = (value) => {
-    const year = value.getFullYear();
-    const month = String(value.getMonth() + 1).padStart(2, '0');
-    const dayOfMonth = String(value.getDate()).padStart(2, '0');
-    return `${year}-${month}-${dayOfMonth}`;
-  };
-
   return {
-    start: toDateString(monday),
-    end: toDateString(sunday)
+    start: getTodayDateString(),
+    end: getDateDaysAheadString(7)
   };
 }
 
@@ -5472,8 +5508,9 @@ function matchesDueDateSecondaryFilter(action, dueFilter) {
   }
 
   if (dueFilter === 'Due this week') {
+    const today = getTodayDateString();
     const weekRange = getDueThisWeekRange();
-    return action.dueDate >= weekRange.start && action.dueDate <= weekRange.end;
+    return action.dueDate > today && action.dueDate <= weekRange.end;
   }
 
   return true;
@@ -5492,13 +5529,21 @@ function matchesGlobalActionSecondaryFilters(action) {
     return false;
   }
 
+  if (state.actionsResponsibilityFilter !== 'Any responsibility') {
+    const selectedResponsibility = state.actionsResponsibilityFilter.toLowerCase();
+    if (getActionDisplayedResponsibility(action) !== selectedResponsibility) {
+      return false;
+    }
+  }
+
   return true;
 }
 
 function hasActiveGlobalSecondaryFilters() {
   return state.actionsCustomerFilter !== 'All customers'
     || state.actionsPartnerFilter !== 'All partners'
-    || state.actionsDueDateFilter !== 'Any due date';
+    || state.actionsDueDateFilter !== 'Any due date'
+    || state.actionsResponsibilityFilter !== 'Any responsibility';
 }
 
 function sortGlobalActions(actions, sortBy) {
@@ -6153,14 +6198,468 @@ function getActionStatusLabel(action) {
   return isActionOverdue(action) ? 'Overdue' : (action.status || 'Open');
 }
 
+function getActiveActions(actions) {
+  return (Array.isArray(actions) ? actions : []).filter((action) => !isActionClosed(action));
+}
+
+function getMeetingActions(meeting) {
+  if (!meeting || !meeting.id) {
+    return [];
+  }
+
+  return getCombinedActions().filter((action) => action.sourceMeetingId === meeting.id);
+}
+
+function getMeetingReviewWarnings(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return [];
+  }
+
+  const warnings = [];
+  const customerName = cleanupEntityDisplayName(getMeetingCustomerName(meeting));
+  const partnerName = cleanupEntityDisplayName(getMeetingPartnerName(meeting));
+  const participants = extractParticipantRecordsFromMeeting(meeting);
+  const summaryItems = getMeetingSectionItems(meeting, 'summary');
+  const cleanedTranscript = normalizeCompanyName(meeting.cleanedTranscript || '');
+  const meetingActions = getMeetingActions(meeting);
+  const activeActions = getActiveActions(meetingActions);
+  const unassignedActiveActions = activeActions.filter((action) => getActionDisplayedResponsibility(action) === 'unassigned');
+  const activeActionsWithoutDueDate = activeActions.filter((action) => !action.dueDate);
+  const openQuestions = getMeetingSectionItems(meeting, 'openQuestions');
+  const title = normalizeCompanyName(meeting.title || '');
+
+  if (!normalizeExtractedDate(meeting.date || '')) {
+    warnings.push('Meeting date is missing.');
+  }
+
+  if (!customerName && !partnerName) {
+    warnings.push('Customer and partner are missing.');
+  }
+
+  if (!participants.length) {
+    warnings.push('No participants were identified.');
+  }
+
+  if (!summaryItems.length) {
+    warnings.push('Summary is missing.');
+  }
+
+  if (!cleanedTranscript) {
+    warnings.push('Cleaned transcript is missing.');
+  }
+
+  if (!meetingActions.length) {
+    warnings.push('No actions were detected.');
+  }
+
+  if (unassignedActiveActions.length) {
+    warnings.push(`${unassignedActiveActions.length} active action${unassignedActiveActions.length === 1 ? '' : 's'} have unassigned responsibility.`);
+  }
+
+  if (activeActionsWithoutDueDate.length) {
+    warnings.push(`${activeActionsWithoutDueDate.length} active action${activeActionsWithoutDueDate.length === 1 ? '' : 's'} have no due date.`);
+  }
+
+  if (customerName && customerName.length > 80) {
+    warnings.push('Customer name looks unusually long and should be checked.');
+  }
+
+  if (partnerName && partnerName.length > 80) {
+    warnings.push('Partner name looks unusually long and should be checked.');
+  }
+
+  if (!title) {
+    warnings.push('Meeting title is empty.');
+  }
+
+  if (openQuestions.length) {
+    warnings.push(`${openQuestions.length} open question${openQuestions.length === 1 ? '' : 's'} are still recorded.`);
+  }
+
+  return warnings;
+}
+
+function getReviewQueueStatusCounts(meetings) {
+  const counts = {
+    needsReview: 0,
+    needsCorrection: 0,
+    reviewed: 0
+  };
+
+  (Array.isArray(meetings) ? meetings : []).forEach((meeting) => {
+    const reviewStatus = normalizeMeetingReviewStatus(meeting && meeting.reviewStatus);
+    if (reviewStatus === 'needs_correction') {
+      counts.needsCorrection += 1;
+    } else if (reviewStatus === 'reviewed') {
+      counts.reviewed += 1;
+    } else {
+      counts.needsReview += 1;
+    }
+  });
+
+  return counts;
+}
+
+function getReviewQueueStatusRank(value) {
+  const normalized = normalizeMeetingReviewStatus(value);
+  if (normalized === 'needs_correction') {
+    return 0;
+  }
+
+  if (normalized === 'needs_review') {
+    return 1;
+  }
+
+  return 2;
+}
+
+function sortReviewQueueMeetings(meetings, selectedFilter) {
+  const normalizedFilter = REVIEW_QUEUE_FILTER_OPTIONS.includes(selectedFilter) ? selectedFilter : 'All pending';
+  return [...(Array.isArray(meetings) ? meetings : [])].sort((first, second) => {
+    if (normalizedFilter === 'All pending') {
+      const firstRank = getReviewQueueStatusRank(first.reviewStatus);
+      const secondRank = getReviewQueueStatusRank(second.reviewStatus);
+      if (firstRank !== secondRank) {
+        return firstRank - secondRank;
+      }
+    }
+
+    return compareMeetingsNewestFirst(first, second);
+  });
+}
+
+function getReviewQueueMeetings(selectedFilter) {
+  const normalizedFilter = REVIEW_QUEUE_FILTER_OPTIONS.includes(selectedFilter) ? selectedFilter : 'All pending';
+  const meetings = getAllMeetings();
+  let filteredMeetings = meetings;
+
+  if (normalizedFilter === 'Needs review') {
+    filteredMeetings = meetings.filter((meeting) => normalizeMeetingReviewStatus(meeting.reviewStatus) === 'needs_review');
+  } else if (normalizedFilter === 'Needs correction') {
+    filteredMeetings = meetings.filter((meeting) => normalizeMeetingReviewStatus(meeting.reviewStatus) === 'needs_correction');
+  } else if (normalizedFilter === 'Reviewed') {
+    filteredMeetings = meetings.filter((meeting) => normalizeMeetingReviewStatus(meeting.reviewStatus) === 'reviewed');
+  } else {
+    filteredMeetings = meetings.filter((meeting) => normalizeMeetingReviewStatus(meeting.reviewStatus) !== 'reviewed');
+  }
+
+  return sortReviewQueueMeetings(filteredMeetings, normalizedFilter);
+}
+
+async function updateMeetingReviewStatus(meetingId, nextStatus) {
+  const meetingIndex = getSavedMeetingIndex(meetingId);
+  if (meetingIndex < 0) {
+    state.meetingReviewStatusError = 'Only meetings loaded for this account can be updated.';
+    renderViews();
+    return false;
+  }
+
+  if (!supabaseClient || !authState.user || !authState.user.id) {
+    state.meetingReviewStatusError = 'You must be signed in to update review status.';
+    renderViews();
+    return false;
+  }
+
+  const normalizedStatus = normalizeMeetingReviewStatus(nextStatus);
+  state.meetingReviewStatusSaving = true;
+  state.meetingReviewStatusError = '';
+  renderViews();
+
+  const { data, error } = await supabaseClient
+    .from('meetings')
+    .update({
+      review_status: normalizedStatus,
+      updated_at: new Date().toISOString()
+    })
+    .eq('id', meetingId)
+    .eq('user_id', authState.user.id)
+    .select(MEETING_ROW_COLUMNS)
+    .single();
+
+  state.meetingReviewStatusSaving = false;
+
+  if (error || !data) {
+    state.meetingReviewStatusError = 'Unable to save review status right now.';
+    renderViews();
+    return false;
+  }
+
+  const updatedMeetings = [...state.savedMeetings];
+  updatedMeetings[meetingIndex] = mapDatabaseRowToMeeting(data);
+  state.savedMeetings = updatedMeetings.sort(compareMeetingsNewestFirst);
+  state.meetingReviewStatusError = '';
+  renderViews();
+  return true;
+}
+
+function isActionDueToday(action) {
+  return Boolean(action && action.dueDate && action.dueDate === getTodayDateString() && !isActionClosed(action));
+}
+
+function isActionDueLaterThisWeek(action) {
+  if (!action || !action.dueDate || isActionClosed(action)) {
+    return false;
+  }
+
+  const today = getTodayDateString();
+  const weekRange = getDueThisWeekRange();
+  return action.dueDate > today && action.dueDate <= weekRange.end;
+}
+
+function getDashboardNeedsAttentionCards(actions) {
+  const activeActions = getActiveActions(actions);
+  return [
+    {
+      key: 'overdue',
+      title: 'Overdue',
+      label: 'Past due',
+      count: activeActions.filter((action) => isActionOverdue(action)).length
+    },
+    {
+      key: 'dueToday',
+      title: 'Due today',
+      label: 'Needs attention today',
+      count: activeActions.filter((action) => isActionDueToday(action)).length
+    },
+    {
+      key: 'dueThisWeek',
+      title: 'Due this week',
+      label: 'Next 7 calendar days',
+      count: activeActions.filter((action) => isActionDueLaterThisWeek(action)).length
+    },
+    {
+      key: 'waiting',
+      title: 'Waiting',
+      label: 'Blocked or pending reply',
+      count: activeActions.filter((action) => isWaitingActionStatus(action.status)).length
+    },
+    {
+      key: 'unassigned',
+      title: 'Unassigned',
+      label: 'Responsibility not set',
+      count: activeActions.filter((action) => getActionDisplayedResponsibility(action) === 'unassigned').length
+    },
+    {
+      key: 'noDueDate',
+      title: 'No due date',
+      label: 'Missing target date',
+      count: activeActions.filter((action) => !action.dueDate).length
+    }
+  ];
+}
+
+function getPriorityFollowUpRank(action) {
+  if (isActionOverdue(action)) {
+    return 0;
+  }
+
+  if (isActionDueToday(action)) {
+    return 1;
+  }
+
+  if (isActionDueLaterThisWeek(action)) {
+    return 2;
+  }
+
+  if (isWaitingActionStatus(action.status)) {
+    return 3;
+  }
+
+  if (action && action.dueDate) {
+    return 4;
+  }
+
+  return 5;
+}
+
+function sortPriorityFollowUps(actions) {
+  return [...getActiveActions(actions)].sort((first, second) => {
+    const firstRank = getPriorityFollowUpRank(first);
+    const secondRank = getPriorityFollowUpRank(second);
+    if (firstRank !== secondRank) {
+      return firstRank - secondRank;
+    }
+
+    if (first.dueDate && second.dueDate && first.dueDate !== second.dueDate) {
+      return first.dueDate.localeCompare(second.dueDate);
+    }
+
+    return getActionSourceMeetingTimestamp(second) - getActionSourceMeetingTimestamp(first);
+  });
+}
+
+function renderNeedsAttentionCard(card) {
+  const countLabel = `${card.count} action${card.count === 1 ? '' : 's'}`;
+  return `
+    <button class="dashboard-attention-card dashboard-attention-card--${escapeHtml(card.key)} js-dashboard-attention-card" type="button" data-attention-filter="${escapeHtml(card.key)}" aria-label="Open ${escapeHtml(card.title)} actions">
+      <span class="dashboard-attention-card-title">${escapeHtml(card.title)}</span>
+      <strong class="dashboard-attention-card-count">${escapeHtml(countLabel)}</strong>
+      <span class="dashboard-attention-card-label">${escapeHtml(card.label)}</span>
+    </button>
+  `;
+}
+
+function renderNeedsAttentionSection(cards) {
+  return `
+    <section class="panel-card dashboard-attention-panel">
+      <div class="section-heading dashboard-attention-heading">
+        <div>
+          <h3>Needs Attention</h3>
+          <p class="entity-meta">Quick links to the active actions that need review.</p>
+        </div>
+      </div>
+      <div class="dashboard-attention-grid">
+        ${cards.map((card) => renderNeedsAttentionCard(card)).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function applyDashboardAttentionFilter(filterKey) {
+  state.activeSection = 'actions';
+  state.selectedMeetingId = null;
+  state.meetingEditMode = false;
+  state.meetingEditDraft = null;
+  state.meetingEditError = '';
+  state.selectedCustomerKey = null;
+  state.selectedPartnerKey = null;
+  state.partnerStatusBriefOpen = false;
+  state.selectedParticipantKey = null;
+  state.meetingReturnContext = null;
+  state.searchHighlightedActionId = '';
+  state.actionFilter = 'Active';
+  state.actionsCustomerFilter = 'All customers';
+  state.actionsPartnerFilter = 'All partners';
+  state.actionsDueDateFilter = 'Any due date';
+  state.actionsResponsibilityFilter = 'Any responsibility';
+  state.actionsSortBy = 'Priority';
+
+  if (filterKey === 'overdue') {
+    state.actionFilter = 'Overdue';
+  } else if (filterKey === 'dueToday') {
+    state.actionsDueDateFilter = 'Due today';
+  } else if (filterKey === 'dueThisWeek') {
+    state.actionsDueDateFilter = 'Due this week';
+  } else if (filterKey === 'waiting') {
+    state.actionFilter = 'Waiting';
+  } else if (filterKey === 'unassigned') {
+    state.actionsResponsibilityFilter = 'Unassigned';
+  } else if (filterKey === 'noDueDate') {
+    state.actionFilter = 'No due date';
+  }
+
+  renderViews();
+}
+
+function openReviewQueueWithFilter(filterLabel = 'All pending') {
+  state.activeSection = 'reviewQueue';
+  state.reviewQueueFilter = REVIEW_QUEUE_FILTER_OPTIONS.includes(filterLabel) ? filterLabel : 'All pending';
+  state.selectedMeetingId = null;
+  state.meetingEditMode = false;
+  state.meetingEditDraft = null;
+  state.meetingEditError = '';
+  state.selectedCustomerKey = null;
+  state.selectedPartnerKey = null;
+  state.partnerStatusBriefOpen = false;
+  state.selectedParticipantKey = null;
+  state.meetingReturnContext = null;
+  state.searchHighlightedActionId = '';
+  renderViews();
+}
+
+function renderDashboardReviewIndicator(counts) {
+  return `
+    <section class="panel-card dashboard-review-panel">
+      <div class="section-heading dashboard-review-heading">
+        <div>
+          <h3>Review Queue</h3>
+          <p class="entity-meta">Imported meetings that still need human review.</p>
+        </div>
+      </div>
+      <div class="dashboard-review-grid">
+        <button class="dashboard-review-card dashboard-review-card--needs-review js-open-review-queue-filter" type="button" data-review-queue-filter="Needs review">
+          <span class="dashboard-review-card-title">Needs review</span>
+          <strong class="dashboard-review-card-count">${counts.needsReview}</strong>
+        </button>
+        <button class="dashboard-review-card dashboard-review-card--needs-correction js-open-review-queue-filter" type="button" data-review-queue-filter="Needs correction">
+          <span class="dashboard-review-card-title">Needs correction</span>
+          <strong class="dashboard-review-card-count">${counts.needsCorrection}</strong>
+        </button>
+      </div>
+    </section>
+  `;
+}
+
+function renderReviewQueueMeetingCard(meeting, selectedFilter) {
+  const warnings = getMeetingReviewWarnings(meeting);
+  const warningCount = warnings.length;
+  const previewWarnings = warnings.slice(0, 3);
+  const sourceLabel = getMeetingTypeSourceLabel(meeting);
+  const dateLabel = meeting.date ? formatDate(meeting.date) : 'Date not available';
+  return `
+    <article class="review-queue-card">
+      <div class="review-queue-card-header">
+        <div>
+          <p class="meeting-meta">${escapeHtml(dateLabel)}</p>
+          <h4>${escapeHtml(meeting.title || 'Untitled meeting')}</h4>
+        </div>
+        <div class="review-queue-card-badges">
+          ${renderMeetingReviewStatusBadge(meeting.reviewStatus)}
+          <span class="meeting-status ${sourceLabel === 'Imported' ? 'completed' : ''}">${escapeHtml(sourceLabel)}</span>
+        </div>
+      </div>
+      <div class="meeting-table-details review-queue-card-details">
+        <div><strong>Customer</strong><span>${escapeHtml(getMeetingDisplayCustomer(meeting))}</span></div>
+        <div><strong>Partner</strong><span>${escapeHtml(getMeetingDisplayPartner(meeting))}</span></div>
+        <div><strong>Warnings</strong><span>${warningCount}</span></div>
+        <div><strong>Open actions</strong><span>${getMeetingOpenActionCount(meeting)}</span></div>
+      </div>
+      <div class="review-queue-warning-preview">
+        ${previewWarnings.length ? `<ul class="viewer-list">${previewWarnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul>` : '<p class="entity-meta">No review warnings detected.</p>'}
+      </div>
+      <div class="review-queue-card-actions">
+        <button class="secondary-button js-open-meeting" type="button" data-meeting-id="${escapeHtml(meeting.id)}" data-return-section="reviewQueue" data-return-key="${escapeHtml(selectedFilter)}">Open review</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderReviewQueue() {
+  const selectedFilter = REVIEW_QUEUE_FILTER_OPTIONS.includes(state.reviewQueueFilter) ? state.reviewQueueFilter : 'All pending';
+  const filteredMeetings = getReviewQueueMeetings(selectedFilter);
+  const tabs = REVIEW_QUEUE_FILTER_OPTIONS.map((filterLabel) => {
+    const isActiveFilter = filterLabel === selectedFilter;
+    return `<button class="action-tab js-review-queue-filter${isActiveFilter ? ' active' : ''}" type="button" data-review-queue-filter="${escapeHtml(filterLabel)}" aria-pressed="${isActiveFilter ? 'true' : 'false'}">${escapeHtml(filterLabel)}</button>`;
+  }).join('');
+  const listMarkup = filteredMeetings.length
+    ? filteredMeetings.map((meeting) => renderReviewQueueMeetingCard(meeting, selectedFilter)).join('')
+    : renderEmptyState('No meetings currently need review.', selectedFilter === 'Reviewed' ? 'No reviewed meetings match this filter.' : 'All imported meetings are currently reviewed.');
+
+  return `
+    <section class="panel-card review-queue-shell">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Meeting review</p>
+          <h3>Review Queue</h3>
+        </div>
+      </div>
+      <div class="action-tabs review-queue-tabs" role="group" aria-label="Review queue filters">${tabs}</div>
+      <div class="review-queue-list">${listMarkup}</div>
+    </section>
+  `;
+}
+
 function renderDashboard(meetings) {
   const totalMeetings = getAllMeetings().length;
   const totalCustomers = getCustomersFromMeetings().length;
   const totalPartners = getPartnersFromMeetings().length;
   const combinedActions = sortCombinedActions(getCombinedActions());
-  const openActions = combinedActions.filter((action) => !isActionClosed(action)).length;
+  const activeActions = getActiveActions(combinedActions);
+  const openActions = activeActions.length;
   const recentMeetings = meetings.slice(0, 3);
-  const followUps = combinedActions.filter((action) => !isActionClosed(action)).slice(0, 3);
+  const followUps = sortPriorityFollowUps(combinedActions).slice(0, 3);
+  const needsAttentionCards = getDashboardNeedsAttentionCards(combinedActions);
+  const reviewCounts = getReviewQueueStatusCounts(getAllMeetings());
   const hasRealData = totalMeetings > 0 || combinedActions.length > 0;
   const emptyState = hasRealData
     ? ''
@@ -6195,6 +6694,10 @@ function renderDashboard(meetings) {
       </article>
     </section>
 
+    ${renderNeedsAttentionSection(needsAttentionCards)}
+
+    ${renderDashboardReviewIndicator(reviewCounts)}
+
     <section class="grid-2">
       <div class="panel-card">
         <div class="section-heading">
@@ -6207,10 +6710,10 @@ function renderDashboard(meetings) {
 
       <div class="panel-card">
         <div class="section-heading">
-          <h3>Open Follow-ups</h3>
+          <h3>Priority Follow-ups</h3>
         </div>
         <div class="action-list">
-          ${followUps.length ? followUps.map((action) => renderActionCard(action, { editable: false })).join('') : renderEmptyState('No open follow-ups', 'Action items from meetings will appear here once available.')}
+          ${followUps.length ? followUps.map((action) => renderActionCard(action, { editable: false })).join('') : renderEmptyState('No active follow-ups need attention.', 'Completed and cancelled actions are excluded from this list.')}
         </div>
       </div>
     </section>
@@ -6254,6 +6757,7 @@ function renderMeetingListItem(meeting, options = {}) {
   const partner = getMeetingDisplayPartner(meeting);
   const participantNames = getMeetingDisplayParticipants(meeting);
   const openActions = getMeetingOpenActionCount(meeting);
+  const reviewStatusBadge = renderMeetingReviewStatusBadge(meeting.reviewStatus);
   const returnAttributes = options.returnSection && options.returnKey
     ? ` data-return-section="${escapeHtml(options.returnSection)}" data-return-key="${escapeHtml(options.returnKey)}"`
     : '';
@@ -6265,7 +6769,10 @@ function renderMeetingListItem(meeting, options = {}) {
           <p class="meeting-meta">${formatDate(meeting.date)} · ${getMeetingDurationLabel(meeting)}</p>
           <h4>${escapeHtml(meeting.title || 'Untitled meeting')}</h4>
         </div>
-        <span class="meeting-status ${meeting.meetingType === 'Demo' ? '' : 'completed'}">${escapeHtml(meeting.meetingType || 'Imported')}</span>
+        <div class="meeting-card-badges">
+          ${reviewStatusBadge}
+          <span class="meeting-status ${meeting.meetingType === 'Demo' ? '' : 'completed'}">${escapeHtml(meeting.meetingType || 'Imported')}</span>
+        </div>
       </div>
       <div class="meeting-table-details">
         <div><strong>Customer</strong><span>${escapeHtml(customer)}</span></div>
@@ -6467,11 +6974,33 @@ function renderMeetingDetailViewer(meeting) {
   const partner = getMeetingDisplayPartner(meeting);
   const openActions = getMeetingOpenActionCount(meeting);
   const canEdit = isSavedMeetingEditable(meeting.id);
+  const reviewStatus = normalizeMeetingReviewStatus(meeting.reviewStatus);
+  const reviewWarnings = getMeetingReviewWarnings(meeting);
   const durationLabel = (typeof meeting.duration === 'string' && meeting.duration.trim())
     ? meeting.duration
     : (typeof meeting.durationMinutes === 'number' && meeting.durationMinutes > 0 ? `${meeting.durationMinutes} minutes` : 'Not captured yet');
   const dateLabel = meeting.date ? `${formatDate(meeting.date)}${meeting.startTime ? ` · ${meeting.startTime}` : ''}` : 'Date not available';
   const subjectText = meeting.subject || 'No subject captured yet.';
+  const reviewActionButtons = reviewStatus === 'needs_review'
+    ? `
+      <button class="secondary-button js-set-meeting-review-status" type="button" data-review-status="reviewed" ${state.meetingReviewStatusSaving ? 'disabled' : ''}>Mark as reviewed</button>
+      <button class="secondary-button js-set-meeting-review-status" type="button" data-review-status="needs_correction" ${state.meetingReviewStatusSaving ? 'disabled' : ''}>Mark as needs correction</button>
+    `
+    : (reviewStatus === 'reviewed'
+      ? `
+        <button class="secondary-button js-set-meeting-review-status" type="button" data-review-status="needs_review" ${state.meetingReviewStatusSaving ? 'disabled' : ''}>Reopen review</button>
+        <button class="secondary-button js-set-meeting-review-status" type="button" data-review-status="needs_correction" ${state.meetingReviewStatusSaving ? 'disabled' : ''}>Mark as needs correction</button>
+      `
+      : `
+        <button class="secondary-button js-set-meeting-review-status" type="button" data-review-status="reviewed" ${state.meetingReviewStatusSaving ? 'disabled' : ''}>Mark as reviewed</button>
+        <button class="secondary-button js-set-meeting-review-status" type="button" data-review-status="needs_review" ${state.meetingReviewStatusSaving ? 'disabled' : ''}>Mark as needs review</button>
+      `);
+  const reviewStatusFeedback = state.meetingReviewStatusError
+    ? `<p class="import-error" role="alert">${escapeHtml(state.meetingReviewStatusError)}</p>`
+    : (state.meetingReviewStatusSaving ? '<p class="entity-meta" role="status">Saving review status...</p>' : '');
+  const reviewChecksMarkup = reviewWarnings.length
+    ? `<ul class="viewer-list">${reviewWarnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul>`
+    : '<p class="meeting-review-checks-clear">No review warnings detected.</p>';
 
   return `
     <section class="viewer-shell">
@@ -6514,6 +7043,28 @@ function renderMeetingDetailViewer(meeting) {
           <span>${openActions}</span>
         </div>
       </div>
+
+      <section class="panel-card meeting-review-panel">
+        <div class="meeting-review-panel-header">
+          <div>
+            <p class="eyebrow">Review status</p>
+            <div class="meeting-review-status-row">
+              ${renderMeetingReviewStatusBadge(reviewStatus)}
+            </div>
+          </div>
+          <div class="meeting-review-actions">
+            ${reviewActionButtons}
+          </div>
+        </div>
+        ${reviewStatusFeedback}
+      </section>
+
+      <section class="panel-card meeting-review-panel">
+        <div class="section-heading">
+          <h3>Review checks</h3>
+        </div>
+        ${reviewChecksMarkup}
+      </section>
 
       <div class="viewer-tabs" role="tablist" aria-label="Meeting sections">
         ${viewerTabs.map((tab) => `
@@ -7018,6 +7569,9 @@ function renderActions() {
   if (!GLOBAL_ACTION_DUE_FILTER_OPTIONS.includes(state.actionsDueDateFilter)) {
     state.actionsDueDateFilter = 'Any due date';
   }
+  if (!GLOBAL_ACTION_RESPONSIBILITY_FILTER_OPTIONS.includes(state.actionsResponsibilityFilter)) {
+    state.actionsResponsibilityFilter = 'Any responsibility';
+  }
   if (!GLOBAL_ACTION_SORT_OPTIONS.includes(state.actionsSortBy)) {
     state.actionsSortBy = 'Priority';
   }
@@ -7053,6 +7607,7 @@ function renderActions() {
   const customerOptions = options.customers.map((customer) => `<option value="${escapeHtml(customer)}" ${customer === state.actionsCustomerFilter ? 'selected' : ''}>${escapeHtml(customer)}</option>`).join('');
   const partnerOptions = options.partners.map((partner) => `<option value="${escapeHtml(partner)}" ${partner === state.actionsPartnerFilter ? 'selected' : ''}>${escapeHtml(partner)}</option>`).join('');
   const dueDateOptions = GLOBAL_ACTION_DUE_FILTER_OPTIONS.map((dueFilter) => `<option value="${escapeHtml(dueFilter)}" ${dueFilter === state.actionsDueDateFilter ? 'selected' : ''}>${escapeHtml(dueFilter)}</option>`).join('');
+  const responsibilityOptions = GLOBAL_ACTION_RESPONSIBILITY_FILTER_OPTIONS.map((option) => `<option value="${escapeHtml(option)}" ${option === state.actionsResponsibilityFilter ? 'selected' : ''}>${escapeHtml(option)}</option>`).join('');
   const sortByOptions = GLOBAL_ACTION_SORT_OPTIONS.map((sortOption) => `<option value="${escapeHtml(sortOption)}" ${sortOption === state.actionsSortBy ? 'selected' : ''}>${escapeHtml(sortOption)}</option>`).join('');
 
   const listMarkup = sortedActions.length
@@ -7090,6 +7645,10 @@ function renderActions() {
           <select id="actions-due-filter" class="sort-select js-actions-due-filter">${dueDateOptions}</select>
         </div>
         <div class="action-toolbar-field">
+          <label class="sort-label" for="actions-responsibility-filter">Responsibility</label>
+          <select id="actions-responsibility-filter" class="sort-select js-actions-responsibility-filter">${responsibilityOptions}</select>
+        </div>
+        <div class="action-toolbar-field">
           <label class="sort-label" for="actions-sort-by">Sort by</label>
           <select id="actions-sort-by" class="sort-select js-actions-sort-by">${sortByOptions}</select>
         </div>
@@ -7107,7 +7666,7 @@ function isActionDueSoon(action) {
   }
 
   const weekRange = getDueThisWeekRange();
-  return action.dueDate >= getTodayDateString() && action.dueDate <= weekRange.end;
+  return action.dueDate > getTodayDateString() && action.dueDate <= weekRange.end;
 }
 
 function renderCompactActionRow(action) {
@@ -8851,6 +9410,8 @@ function attachInteractions() {
       state.meetingEditMode = false;
       state.meetingEditDraft = null;
       state.meetingEditError = '';
+      state.meetingReviewStatusError = '';
+      state.meetingReviewStatusSaving = false;
       state.meetingDocumentDownloadInProgressId = '';
       state.meetingDocumentDownloadError = '';
       state.activeViewerTab = 'overview';
@@ -8941,6 +9502,12 @@ function attachInteractions() {
         state.selectedCustomerKey = null;
         state.selectedPartnerKey = null;
         state.selectedParticipantKey = null;
+      } else if (state.meetingReturnContext && state.meetingReturnContext.section === 'reviewQueue') {
+        state.activeSection = 'reviewQueue';
+        state.reviewQueueFilter = REVIEW_QUEUE_FILTER_OPTIONS.includes(state.meetingReturnContext.key) ? state.meetingReturnContext.key : 'All pending';
+        state.selectedCustomerKey = null;
+        state.selectedPartnerKey = null;
+        state.selectedParticipantKey = null;
       } else if (state.meetingReturnContext && state.meetingReturnContext.section === 'search') {
         state.activeSection = state.meetingReturnContext.key || state.activeSection;
         state.searchResultsOpen = normalizeSearchQuery(state.searchQuery).length >= SEARCH_MIN_CHARS;
@@ -8954,10 +9521,38 @@ function attachInteractions() {
       state.meetingEditMode = false;
       state.meetingEditDraft = null;
       state.meetingEditError = '';
+      state.meetingReviewStatusError = '';
+      state.meetingReviewStatusSaving = false;
       state.meetingReturnContext = null;
       state.meetingDocumentDownloadInProgressId = '';
       state.meetingDocumentDownloadError = '';
       renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-review-queue-filter').forEach((button) => {
+    button.addEventListener('click', () => {
+      const nextFilter = button.dataset.reviewQueueFilter || 'All pending';
+      state.reviewQueueFilter = REVIEW_QUEUE_FILTER_OPTIONS.includes(nextFilter) ? nextFilter : 'All pending';
+      renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-open-review-queue-filter').forEach((button) => {
+    button.addEventListener('click', () => {
+      openReviewQueueWithFilter(button.dataset.reviewQueueFilter || 'All pending');
+    });
+  });
+
+  document.querySelectorAll('.js-set-meeting-review-status').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const nextStatus = button.dataset.reviewStatus || '';
+      if (!state.selectedMeetingId || !MEETING_REVIEW_STATUS_VALUES.includes(nextStatus) || state.meetingReviewStatusSaving) {
+        return;
+      }
+
+      button.disabled = true;
+      await updateMeetingReviewStatus(state.selectedMeetingId, nextStatus);
     });
   });
 
@@ -9141,6 +9736,14 @@ function attachInteractions() {
     });
   }
 
+  const actionsResponsibilityFilter = document.querySelector('.js-actions-responsibility-filter');
+  if (actionsResponsibilityFilter) {
+    actionsResponsibilityFilter.addEventListener('change', (event) => {
+      state.actionsResponsibilityFilter = event.target.value || 'Any responsibility';
+      renderViews();
+    });
+  }
+
   const actionsSortBy = document.querySelector('.js-actions-sort-by');
   if (actionsSortBy) {
     actionsSortBy.addEventListener('change', (event) => {
@@ -9155,8 +9758,15 @@ function attachInteractions() {
       state.actionsCustomerFilter = 'All customers';
       state.actionsPartnerFilter = 'All partners';
       state.actionsDueDateFilter = 'Any due date';
+      state.actionsResponsibilityFilter = 'Any responsibility';
       state.actionsSortBy = 'Priority';
       renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-dashboard-attention-card').forEach((button) => {
+    button.addEventListener('click', () => {
+      applyDashboardAttentionFilter(button.dataset.attentionFilter || '');
     });
   });
 
