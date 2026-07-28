@@ -23,6 +23,7 @@ const SETTINGS_STORAGE_KEY = 'taskletTranscriptApp.settings';
 const BACKUP_APP_NAME = 'Tasklet Transcript App';
 const BACKUP_VERSION = 1;
 const ACTION_STATUSES = ['Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally', 'Completed', 'Cancelled'];
+const SALES_HUB_OUTSTANDING_ACTION_STATUSES = ['Open', 'In Progress', 'Waiting for Customer', 'Waiting Internally'];
 const ACTION_FILTERS = ['Active', 'Overdue', 'Open', 'In Progress', 'Waiting', 'Completed', 'All', 'Waiting for Customer', 'Waiting Internally', 'Cancelled', 'No due date'];
 const ENTITY_DETAIL_ACTION_FILTERS = ['Active', 'Open', 'Waiting', 'Completed', 'All'];
 const ACTION_VIEW_OPTIONS = ['compact', 'cards'];
@@ -3023,6 +3024,17 @@ function canSaveMeeting() {
   );
 }
 
+function createDefaultSalesHubNoteOptions() {
+  return {
+    includeDecisions: true,
+    includeOutstandingActions: true,
+    includeCompletedActions: true,
+    includeOpenQuestions: true,
+    includeCommercialNotes: false,
+    includeCancelledActions: false
+  };
+}
+
 function updateImportSaveButtonState() {
   const saveButton = document.querySelector('.js-save-import-meeting');
   if (!saveButton) {
@@ -3117,7 +3129,13 @@ const state = {
   meetingTypeUpdateError: '',
   meetingDocumentDownloadInProgressId: '',
   meetingDocumentDownloadError: '',
-  meetingDeletionWarning: ''
+  meetingDeletionWarning: '',
+  salesHubNoteModalOpen: false,
+  salesHubNoteOptions: createDefaultSalesHubNoteOptions(),
+  salesHubNotePreviewText: '',
+  salesHubNoteCopyInProgress: false,
+  salesHubNoteCopyFeedback: '',
+  salesHubNoteCopyError: ''
 };
 
 function getDateMonthsAgoString(monthCount) {
@@ -4617,6 +4635,7 @@ function renderViews() {
       state.meetingEditMode = false;
       state.meetingEditDraft = null;
       state.meetingEditError = '';
+      resetSalesHubNotePreviewState();
       viewSections.meetings.innerHTML = renderMeetingsPage();
     } else {
       viewSections.meetings.innerHTML = state.meetingEditMode ? renderMeetingEditForm(selectedMeeting) : renderMeetingDetailViewer(selectedMeeting);
@@ -4629,6 +4648,7 @@ function renderViews() {
     state.meetingEditMode = false;
     state.meetingEditDraft = null;
     state.meetingEditError = '';
+    resetSalesHubNotePreviewState();
     viewSections.meetings.innerHTML = renderMeetingsPage();
   }
 
@@ -7156,6 +7176,615 @@ function getMeetingActions(meeting) {
   return getCombinedActions().filter((action) => action.sourceMeetingId === meeting.id);
 }
 
+function resetSalesHubNotePreviewState() {
+  state.salesHubNoteModalOpen = false;
+  state.salesHubNoteOptions = createDefaultSalesHubNoteOptions();
+  state.salesHubNotePreviewText = '';
+  state.salesHubNoteCopyInProgress = false;
+  state.salesHubNoteCopyFeedback = '';
+  state.salesHubNoteCopyError = '';
+}
+
+function canCopySalesHubNoteForMeeting(meeting) {
+  const reviewStatus = normalizeMeetingReviewStatus(meeting && meeting.reviewStatus);
+  return reviewStatus === 'reviewed';
+}
+
+function getSalesHubNoteGateMessage(reviewStatus) {
+  if (reviewStatus === 'needs_correction') {
+    return 'Resolve the meeting corrections and mark it Reviewed before copying';
+  }
+
+  if (reviewStatus === 'needs_review') {
+    return 'Available after the meeting is marked Reviewed';
+  }
+
+  return 'Preview and copy a concise note for Sales Hub.';
+}
+
+function getMeetingActionsForSalesHubNote(meetingId) {
+  if (!meetingId) {
+    return [];
+  }
+
+  const deduplicationKeys = new Set();
+
+  return getCombinedActions()
+    .filter((action) => action && action.sourceMeetingId === meetingId)
+    .map((action) => {
+      const responsibilityKey = getActionDisplayedResponsibility(action);
+      const responsibilityLabel = getActionOwnershipCategoryLabel(responsibilityKey);
+      const responsibilityName = getSalesHubResponsibilityLabel({
+        ...action,
+        responsibilityKey,
+        responsibilityLabel
+      });
+      const description = normalizeCompanyName(action.description || '');
+      const status = ACTION_STATUSES.includes(action.status) ? action.status : 'Open';
+      const dueDate = normalizeExtractedDate(action.dueDate || '');
+
+      return {
+        ...action,
+        responsibilityKey,
+        responsibilityLabel,
+        responsibilityName,
+        description,
+        status,
+        dueDate
+      };
+    })
+    .filter((action) => action.description)
+    .filter((action) => {
+      const dedupeKey = [
+        action.description.toLowerCase(),
+        action.responsibilityKey,
+        action.status,
+        action.dueDate
+      ].join('|');
+
+      if (deduplicationKeys.has(dedupeKey)) {
+        return false;
+      }
+
+      deduplicationKeys.add(dedupeKey);
+      return true;
+    })
+    .sort((first, second) => {
+      const firstStatusRank = ACTION_STATUSES.indexOf(first.status);
+      const secondStatusRank = ACTION_STATUSES.indexOf(second.status);
+      if (firstStatusRank !== secondStatusRank) {
+        return firstStatusRank - secondStatusRank;
+      }
+
+      if ((first.dueDate || '') !== (second.dueDate || '')) {
+        return (first.dueDate || '9999-12-31').localeCompare(second.dueDate || '9999-12-31');
+      }
+
+      return first.description.localeCompare(second.description);
+    });
+}
+
+function splitMeetingActionsByEffectiveStatus(actions) {
+  const grouped = {
+    outstanding: [],
+    completed: [],
+    cancelled: []
+  };
+
+  (Array.isArray(actions) ? actions : []).forEach((action) => {
+    if (!action || !action.description) {
+      return;
+    }
+
+    if (action.status === 'Completed') {
+      grouped.completed.push(action);
+      return;
+    }
+
+    if (action.status === 'Cancelled') {
+      grouped.cancelled.push(action);
+      return;
+    }
+
+    if (SALES_HUB_OUTSTANDING_ACTION_STATUSES.includes(action.status)) {
+      grouped.outstanding.push(action);
+    }
+  });
+
+  return grouped;
+}
+
+function getSalesHubResponsibilityLabel(action) {
+  if (!action) {
+    return 'Unassigned';
+  }
+
+  if (action.responsibilityKey === 'tasklet') {
+    return 'Tasklet';
+  }
+
+  if (action.responsibilityKey === 'partner') {
+    const partnerName = getCleanActionPartnerLabel(action);
+    return partnerName && partnerName !== 'Unassigned' ? partnerName : 'Partner';
+  }
+
+  if (action.responsibilityKey === 'customer') {
+    const customerName = getCleanActionCustomerLabel(action);
+    return customerName && customerName !== 'Unassigned' ? customerName : 'Customer';
+  }
+
+  return action.responsibilityLabel || 'Unassigned';
+}
+
+function getSalesHubWaitingStatusSuffix(action) {
+  if (!action || !action.status) {
+    return '';
+  }
+
+  if (action.status === 'Waiting for Customer') {
+    return '(waiting for customer)';
+  }
+
+  if (action.status === 'Waiting Internally') {
+    return '(waiting internally)';
+  }
+
+  return '';
+}
+
+function formatSalesHubOutstandingActionLine(action) {
+  if (!action || !action.description) {
+    return '';
+  }
+
+  const parts = [`${action.responsibilityName || 'Unassigned'}: ${action.description}`];
+  const waitingSuffix = getSalesHubWaitingStatusSuffix(action);
+
+  if (waitingSuffix) {
+    parts.push(waitingSuffix);
+  }
+
+  if (action.dueDate) {
+    parts.push(`Due: ${formatDate(action.dueDate)}`);
+  }
+
+  return parts.join(' - ');
+}
+
+function formatSalesHubCompletedActionLine(action) {
+  if (!action || !action.description) {
+    return '';
+  }
+
+  return `${action.responsibilityName || 'Unassigned'}: ${action.description}`;
+}
+
+function getSalesHubNextStepActionLine(action) {
+  if (!action || !action.description) {
+    return '';
+  }
+
+  const parts = [`${action.responsibilityName || 'Unassigned'}: ${action.description}`];
+  const waitingSuffix = getSalesHubWaitingStatusSuffix(action);
+  if (waitingSuffix) {
+    parts.push(waitingSuffix);
+  }
+  if (action.dueDate) {
+    parts.push(`Due: ${formatDate(action.dueDate)}`);
+  }
+
+  return parts.join(' - ');
+}
+
+function deriveSalesHubNextStep(groupedActions, openQuestions) {
+  const outstanding = Array.isArray(groupedActions && groupedActions.outstanding)
+    ? groupedActions.outstanding
+    : [];
+
+  const firstTasklet = outstanding.find((action) => action.responsibilityKey === 'tasklet') || null;
+  const firstPartnerOrCustomer = outstanding.find((action) => action.responsibilityKey === 'partner' || action.responsibilityKey === 'customer') || null;
+
+  if (firstTasklet && firstPartnerOrCustomer && firstTasklet.id !== firstPartnerOrCustomer.id) {
+    return `Follow up on ${getSalesHubNextStepActionLine(firstTasklet)}. Then follow up on ${getSalesHubNextStepActionLine(firstPartnerOrCustomer)}.`;
+  }
+
+  const firstUsefulOutstanding = firstTasklet || firstPartnerOrCustomer || outstanding[0] || null;
+  if (firstUsefulOutstanding) {
+    return `Follow up on ${getSalesHubNextStepActionLine(firstUsefulOutstanding)}.`;
+  }
+
+  const firstOpenQuestion = (Array.isArray(openQuestions) ? openQuestions : []).find(Boolean) || '';
+  if (firstOpenQuestion) {
+    return `Clarify open question: ${firstOpenQuestion}`;
+  }
+
+  return '';
+}
+
+function getSalesHubMetadataLines(meeting) {
+  const lines = [];
+  const meetingTitle = normalizeCompanyName(meeting && meeting.title ? meeting.title : '');
+  const meetingDate = normalizeExtractedDate(meeting && meeting.date ? meeting.date : '');
+  const meetingType = meeting ? getMeetingTypeLabel(meeting.meetingType) : '';
+  const customer = cleanupEntityDisplayName(meeting ? getMeetingDisplayCustomer(meeting) : '');
+  const partner = cleanupEntityDisplayName(meeting ? getMeetingDisplayPartner(meeting) : '');
+  const participants = meeting ? getMeetingDisplayParticipants(meeting) : '';
+
+  if (meetingTitle) {
+    lines.push(`Meeting: ${meetingTitle}`);
+  }
+  if (meetingDate) {
+    lines.push(`Date: ${formatDate(meetingDate)}`);
+  }
+  if (meetingType) {
+    lines.push(`Meeting type: ${meetingType}`);
+  }
+  if (customer && customer !== 'Unassigned') {
+    lines.push(`Customer: ${customer}`);
+  }
+  if (partner && partner !== 'Unassigned') {
+    lines.push(`Partner: ${partner}`);
+  }
+  if (participants && participants !== 'No participants listed') {
+    lines.push(`Participants: ${participants}`);
+  }
+
+  return lines;
+}
+
+function buildSalesHubNoteText(meeting, options) {
+  const normalizedOptions = {
+    ...createDefaultSalesHubNoteOptions(),
+    ...(options || {})
+  };
+  const lines = [];
+  const metadataLines = getSalesHubMetadataLines(meeting);
+  lines.push(...metadataLines);
+
+  const summaryItems = getMeetingSectionItems(meeting, 'summary');
+  if (summaryItems.length) {
+    lines.push('');
+    lines.push('Summary');
+    lines.push(summaryItems.join('\n'));
+  }
+
+  const decisions = normalizedOptions.includeDecisions ? getMeetingSectionItems(meeting, 'decisions') : [];
+  if (decisions.length) {
+    lines.push('');
+    lines.push('Key decisions');
+    decisions.forEach((decision) => {
+      lines.push(`• ${decision}`);
+    });
+  }
+
+  const meetingActions = getMeetingActionsForSalesHubNote(meeting && meeting.id ? meeting.id : '');
+  const groupedActions = splitMeetingActionsByEffectiveStatus(meetingActions);
+
+  if (normalizedOptions.includeOutstandingActions && groupedActions.outstanding.length) {
+    lines.push('');
+    lines.push('Outstanding actions');
+    groupedActions.outstanding.forEach((action) => {
+      const formattedLine = formatSalesHubOutstandingActionLine(action);
+      if (formattedLine) {
+        lines.push(`• ${formattedLine}`);
+      }
+    });
+  }
+
+  if (normalizedOptions.includeCompletedActions && groupedActions.completed.length) {
+    lines.push('');
+    lines.push('Completed follow-up');
+    groupedActions.completed.forEach((action) => {
+      const formattedLine = formatSalesHubCompletedActionLine(action);
+      if (formattedLine) {
+        lines.push(`• ${formattedLine}`);
+      }
+    });
+  }
+
+  if (normalizedOptions.includeCancelledActions && groupedActions.cancelled.length) {
+    lines.push('');
+    lines.push('Cancelled actions');
+    groupedActions.cancelled.forEach((action) => {
+      const formattedLine = formatSalesHubOutstandingActionLine(action);
+      if (formattedLine) {
+        lines.push(`• ${formattedLine}`);
+      }
+    });
+  }
+
+  const allOpenQuestions = getMeetingSectionItems(meeting, 'openQuestions');
+  const openQuestions = normalizedOptions.includeOpenQuestions ? allOpenQuestions : [];
+  if (openQuestions.length) {
+    lines.push('');
+    lines.push('Open questions');
+    openQuestions.forEach((question) => {
+      lines.push(`• ${question}`);
+    });
+  }
+
+  const commercialNotes = normalizedOptions.includeCommercialNotes ? getMeetingSectionItems(meeting, 'commercialNotes') : [];
+  if (commercialNotes.length) {
+    lines.push('');
+    lines.push('Commercial notes');
+    commercialNotes.forEach((note) => {
+      lines.push(`• ${note}`);
+    });
+  }
+
+  const nextStep = deriveSalesHubNextStep(groupedActions, allOpenQuestions);
+  if (nextStep) {
+    lines.push('');
+    lines.push('Next step');
+    lines.push(nextStep);
+  }
+
+  return lines
+    .map((line) => String(line || '').replace(/[ \t]+$/g, ''))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function formatSalesHubHtmlListItem(sectionHeading, rawItemText) {
+  const sanitizedText = String(rawItemText || '').replace(/^[-•*]\s*/, '').trim();
+  if (!sanitizedText) {
+    return '';
+  }
+
+  const normalizedHeading = String(sectionHeading || '').trim().toLowerCase();
+  if (normalizedHeading === 'outstanding actions' || normalizedHeading === 'completed follow-up' || normalizedHeading === 'cancelled actions') {
+    const responsibilityMatch = sanitizedText.match(/^([^:]+):\s*(.+)$/);
+    if (responsibilityMatch) {
+      const responsibility = escapeHtml(responsibilityMatch[1].trim());
+      const description = escapeHtml(responsibilityMatch[2].trim());
+      return `<strong>${responsibility}:</strong> ${description}`;
+    }
+  }
+
+  return escapeHtml(sanitizedText);
+}
+
+function buildSalesHubNoteHtmlFromPlainText(noteText) {
+  const normalizedText = String(noteText || '')
+    .replace(/\r\n?/g, '\n')
+    .trim();
+
+  if (!normalizedText) {
+    return '';
+  }
+
+  const sectionHeadings = new Set([
+    'Summary',
+    'Key decisions',
+    'Outstanding actions',
+    'Completed follow-up',
+    'Open questions',
+    'Next step',
+    'Commercial notes',
+    'Cancelled actions'
+  ]);
+  const listHeadings = new Set([
+    'Key decisions',
+    'Outstanding actions',
+    'Completed follow-up',
+    'Open questions',
+    'Commercial notes',
+    'Cancelled actions'
+  ]);
+  const metadataLabels = new Set(['Meeting', 'Date', 'Meeting type', 'Customer', 'Partner', 'Participants']);
+  const blocks = normalizedText
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  const htmlParts = [];
+
+  blocks.forEach((block) => {
+    const lines = block
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (!lines.length) {
+      return;
+    }
+
+    const isMetadataOnlyBlock = lines.every((line) => {
+      const metadataMatch = line.match(/^([A-Za-z ]+):\s*(.*)$/);
+      return Boolean(metadataMatch && metadataLabels.has(metadataMatch[1].trim()));
+    });
+
+    if (isMetadataOnlyBlock) {
+      lines.forEach((line) => {
+        const metadataMatch = line.match(/^([A-Za-z ]+):\s*(.*)$/);
+        if (!metadataMatch) {
+          return;
+        }
+
+        const label = metadataMatch[1].trim();
+        const value = metadataMatch[2].trim();
+        if (!value) {
+          return;
+        }
+
+        if (label === 'Meeting') {
+          htmlParts.push(`<p><strong>Meeting:</strong> <strong>${escapeHtml(value)}</strong></p>`);
+          return;
+        }
+
+        htmlParts.push(`<p><strong>${escapeHtml(label)}:</strong> ${escapeHtml(value)}</p>`);
+      });
+      return;
+    }
+
+    const heading = lines[0];
+    if (!sectionHeadings.has(heading)) {
+      htmlParts.push(`<p>${lines.map((line) => escapeHtml(line)).join('<br>')}</p>`);
+      return;
+    }
+
+    const contentLines = lines.slice(1);
+    if (!contentLines.length) {
+      return;
+    }
+
+    htmlParts.push(`<p><strong>${escapeHtml(heading)}</strong></p>`);
+
+    if (listHeadings.has(heading)) {
+      const listItems = contentLines
+        .map((line) => formatSalesHubHtmlListItem(heading, line))
+        .filter(Boolean);
+
+      if (listItems.length) {
+        htmlParts.push(`<ul>${listItems.map((item) => `<li>${item}</li>`).join('')}</ul>`);
+      }
+      return;
+    }
+
+    htmlParts.push(`<p>${contentLines.map((line) => escapeHtml(line)).join('<br>')}</p>`);
+  });
+
+  return htmlParts.join('');
+}
+
+async function copySalesHubNoteToClipboard(plainText, htmlText) {
+  const normalizedPlainText = String(plainText || '').trim();
+  const normalizedHtmlText = String(htmlText || '').trim();
+
+  if (!normalizedPlainText) {
+    return false;
+  }
+
+  const supportsRichClipboard = (
+    typeof window !== 'undefined'
+    && typeof window.ClipboardItem === 'function'
+    && typeof Blob !== 'undefined'
+    && typeof navigator !== 'undefined'
+    && navigator.clipboard
+    && typeof navigator.clipboard.write === 'function'
+  );
+
+  if (supportsRichClipboard && normalizedHtmlText) {
+    try {
+      const item = new window.ClipboardItem({
+        'text/plain': new Blob([normalizedPlainText], { type: 'text/plain' }),
+        'text/html': new Blob([normalizedHtmlText], { type: 'text/html' })
+      });
+
+      await navigator.clipboard.write([item]);
+      return true;
+    } catch (error) {
+      // Fall through to plain-text copy when rich clipboard is unavailable or denied.
+    }
+  }
+
+  return copyTextToClipboard(normalizedPlainText);
+}
+
+function refreshSalesHubNotePreviewFromMeeting() {
+  const meeting = getMeetingById(state.selectedMeetingId);
+  if (!meeting || !canCopySalesHubNoteForMeeting(meeting)) {
+    resetSalesHubNotePreviewState();
+    return false;
+  }
+
+  state.salesHubNotePreviewText = buildSalesHubNoteText(meeting, state.salesHubNoteOptions);
+  return true;
+}
+
+function focusSalesHubNoteModal() {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return;
+  }
+
+  window.setTimeout(() => {
+    const previewField = document.querySelector('.js-sales-hub-note-preview-text');
+    if (previewField) {
+      previewField.focus();
+      return;
+    }
+
+    const modal = document.querySelector('.js-sales-hub-note-modal');
+    if (modal) {
+      modal.focus();
+    }
+  }, 0);
+}
+
+function openSalesHubNotePreview() {
+  const meeting = getMeetingById(state.selectedMeetingId);
+  if (!meeting || !canCopySalesHubNoteForMeeting(meeting)) {
+    return;
+  }
+
+  state.salesHubNoteModalOpen = true;
+  state.salesHubNoteOptions = createDefaultSalesHubNoteOptions();
+  state.salesHubNoteCopyFeedback = '';
+  state.salesHubNoteCopyError = '';
+  state.salesHubNoteCopyInProgress = false;
+  state.salesHubNotePreviewText = buildSalesHubNoteText(meeting, state.salesHubNoteOptions);
+  renderViews();
+  focusSalesHubNoteModal();
+}
+
+function closeSalesHubNotePreview() {
+  if (!state.salesHubNoteModalOpen) {
+    return;
+  }
+
+  resetSalesHubNotePreviewState();
+  renderViews();
+
+  if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    window.setTimeout(() => {
+      const triggerButton = document.querySelector('.js-open-sales-hub-note-preview');
+      if (triggerButton) {
+        triggerButton.focus();
+      }
+    }, 0);
+  }
+}
+
+function renderSalesHubNotePreviewModal() {
+  const optionState = {
+    ...createDefaultSalesHubNoteOptions(),
+    ...(state.salesHubNoteOptions || {})
+  };
+  const copyDisabled = state.salesHubNoteCopyInProgress || !String(state.salesHubNotePreviewText || '').trim();
+  const statusMessage = state.salesHubNoteCopyError
+    ? `<p class="import-error" role="alert">${escapeHtml(state.salesHubNoteCopyError)}</p>`
+    : (state.salesHubNoteCopyFeedback ? `<p class="import-success" role="status">${escapeHtml(state.salesHubNoteCopyFeedback)}</p>` : '');
+
+  return `
+    <div class="sales-hub-note-modal js-sales-hub-note-modal" role="dialog" aria-modal="true" aria-labelledby="sales-hub-note-title" tabindex="-1">
+      <div class="sales-hub-note-modal__surface">
+        <div class="section-heading sales-hub-note-modal__header">
+          <h3 id="sales-hub-note-title">Sales Hub Note Preview</h3>
+          <button class="secondary-button secondary-button--compact js-close-sales-hub-note-preview" type="button">Close</button>
+        </div>
+        <div class="sales-hub-note-options" role="group" aria-label="Sales Hub note inclusion options">
+          <label><input class="js-sales-hub-note-option" type="checkbox" data-option-name="includeDecisions" ${optionState.includeDecisions ? 'checked' : ''}> Include decisions</label>
+          <label><input class="js-sales-hub-note-option" type="checkbox" data-option-name="includeOutstandingActions" ${optionState.includeOutstandingActions ? 'checked' : ''}> Include outstanding actions</label>
+          <label><input class="js-sales-hub-note-option" type="checkbox" data-option-name="includeCompletedActions" ${optionState.includeCompletedActions ? 'checked' : ''}> Include completed actions</label>
+          <label><input class="js-sales-hub-note-option" type="checkbox" data-option-name="includeOpenQuestions" ${optionState.includeOpenQuestions ? 'checked' : ''}> Include open questions</label>
+          <label><input class="js-sales-hub-note-option" type="checkbox" data-option-name="includeCommercialNotes" ${optionState.includeCommercialNotes ? 'checked' : ''}> Include commercial notes</label>
+          <label><input class="js-sales-hub-note-option" type="checkbox" data-option-name="includeCancelledActions" ${optionState.includeCancelledActions ? 'checked' : ''}> Include cancelled actions</label>
+        </div>
+        <label class="import-field-group import-field-group--full" for="sales-hub-note-preview-text">
+          <span>Preview text (editable, temporary)</span>
+          <textarea id="sales-hub-note-preview-text" class="import-field import-field--textarea sales-hub-note-preview-text js-sales-hub-note-preview-text">${escapeHtml(state.salesHubNotePreviewText || '')}</textarea>
+        </label>
+        ${statusMessage}
+        <div class="import-actions sales-hub-note-modal__actions">
+          <button class="secondary-button js-refresh-sales-hub-note-preview" type="button">Refresh preview</button>
+          <button class="primary-button js-copy-sales-hub-note" type="button" ${copyDisabled ? 'disabled' : ''}>${state.salesHubNoteCopyInProgress ? 'Copying...' : 'Copy to clipboard'}</button>
+          <button class="secondary-button js-close-sales-hub-note-preview" type="button">Close</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function getMeetingReviewWarnings(meeting) {
   if (!meeting || typeof meeting !== 'object') {
     return [];
@@ -7333,6 +7962,9 @@ async function updateMeetingReviewStatus(meetingId, nextStatus) {
   const updatedMeetings = [...state.savedMeetings];
   updatedMeetings[meetingIndex] = mapDatabaseRowToMeeting(data);
   state.savedMeetings = updatedMeetings.sort(compareMeetingsNewestFirst);
+  if (normalizedStatus !== 'reviewed') {
+    resetSalesHubNotePreviewState();
+  }
   state.meetingReviewStatusError = '';
   renderViews();
   return true;
@@ -8021,6 +8653,11 @@ function renderMeetingDetailViewer(meeting) {
   const reviewChecksMarkup = reviewWarnings.length
     ? `<ul class="viewer-list">${reviewWarnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')}</ul>`
     : '<p class="meeting-review-checks-clear">No review warnings detected.</p>';
+  const salesHubCopyEnabled = canCopySalesHubNoteForMeeting(meeting);
+  const salesHubGateMessage = getSalesHubNoteGateMessage(reviewStatus);
+  const salesHubModalMarkup = state.salesHubNoteModalOpen && salesHubCopyEnabled
+    ? renderSalesHubNotePreviewModal()
+    : '';
 
   return `
     <section class="viewer-shell">
@@ -8089,6 +8726,15 @@ function renderMeetingDetailViewer(meeting) {
           </div>
         </div>
         ${reviewStatusFeedback}
+        <div class="meeting-review-sales-hub-row">
+          <div>
+            <p class="eyebrow">Sales Hub note</p>
+            <p class="entity-meta sales-hub-note-gate-message">${escapeHtml(salesHubGateMessage)}</p>
+          </div>
+          <div class="meeting-review-actions">
+            <button class="secondary-button js-open-sales-hub-note-preview" type="button" ${salesHubCopyEnabled ? '' : 'disabled'}>Copy Sales Hub Note</button>
+          </div>
+        </div>
       </section>
 
       <section class="panel-card meeting-review-panel">
@@ -8107,6 +8753,7 @@ function renderMeetingDetailViewer(meeting) {
       </div>
 
       <div class="viewer-content" id="viewer-content"></div>
+      ${salesHubModalMarkup}
     </section>
   `;
 }
@@ -10576,6 +11223,7 @@ function attachInteractions() {
       state.meetingTypeUpdateInProgress = false;
       state.meetingDocumentDownloadInProgressId = '';
       state.meetingDocumentDownloadError = '';
+      resetSalesHubNotePreviewState();
       state.activeViewerTab = 'overview';
       renderViews();
     });
@@ -10690,7 +11338,116 @@ function attachInteractions() {
       state.meetingReturnContext = null;
       state.meetingDocumentDownloadInProgressId = '';
       state.meetingDocumentDownloadError = '';
+      resetSalesHubNotePreviewState();
       renderViews();
+    });
+  });
+
+  document.querySelectorAll('.js-open-sales-hub-note-preview').forEach((button) => {
+    button.addEventListener('click', () => {
+      openSalesHubNotePreview();
+    });
+  });
+
+  document.querySelectorAll('.js-close-sales-hub-note-preview').forEach((button) => {
+    button.addEventListener('click', () => {
+      closeSalesHubNotePreview();
+    });
+  });
+
+  document.querySelectorAll('.js-sales-hub-note-option').forEach((field) => {
+    field.addEventListener('change', () => {
+      const optionName = String(field.dataset.optionName || '').trim();
+      if (!Object.prototype.hasOwnProperty.call(createDefaultSalesHubNoteOptions(), optionName)) {
+        return;
+      }
+
+      state.salesHubNoteOptions = {
+        ...state.salesHubNoteOptions,
+        [optionName]: Boolean(field.checked)
+      };
+      state.salesHubNoteCopyFeedback = '';
+      state.salesHubNoteCopyError = '';
+      refreshSalesHubNotePreviewFromMeeting();
+      renderViews();
+      focusSalesHubNoteModal();
+    });
+  });
+
+  document.querySelectorAll('.js-sales-hub-note-preview-text').forEach((field) => {
+    field.addEventListener('input', () => {
+      state.salesHubNotePreviewText = String(field.value || '')
+        .replace(/\r\n?/g, '\n')
+        .trim();
+      state.salesHubNoteCopyFeedback = '';
+      state.salesHubNoteCopyError = '';
+    });
+  });
+
+  document.querySelectorAll('.js-copy-sales-hub-note').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const meeting = getMeetingById(state.selectedMeetingId);
+      if (!meeting || !canCopySalesHubNoteForMeeting(meeting)) {
+        state.salesHubNoteCopyFeedback = '';
+        state.salesHubNoteCopyError = 'Unable to copy the Sales Hub note. Please select and copy the preview manually.';
+        renderViews();
+        return;
+      }
+
+      const noteText = String(state.salesHubNotePreviewText || '').trim();
+      if (!noteText) {
+        state.salesHubNoteCopyFeedback = '';
+        state.salesHubNoteCopyError = 'Unable to copy the Sales Hub note. Please select and copy the preview manually.';
+        renderViews();
+        return;
+      }
+      const noteHtml = buildSalesHubNoteHtmlFromPlainText(noteText);
+
+      state.salesHubNoteCopyInProgress = true;
+      state.salesHubNoteCopyFeedback = '';
+      state.salesHubNoteCopyError = '';
+      renderViews();
+
+      const copied = await copySalesHubNoteToClipboard(noteText, noteHtml);
+      state.salesHubNoteCopyInProgress = false;
+      if (copied) {
+        state.salesHubNoteCopyFeedback = 'Sales Hub note copied to clipboard';
+        state.salesHubNoteCopyError = '';
+      } else {
+        state.salesHubNoteCopyFeedback = '';
+        state.salesHubNoteCopyError = 'Unable to copy the Sales Hub note. Please select and copy the preview manually.';
+      }
+
+      renderViews();
+      focusSalesHubNoteModal();
+    });
+  });
+
+  document.querySelectorAll('.js-refresh-sales-hub-note-preview').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.salesHubNoteCopyFeedback = '';
+      state.salesHubNoteCopyError = '';
+      const refreshed = refreshSalesHubNotePreviewFromMeeting();
+      if (!refreshed) {
+        state.salesHubNoteCopyError = 'Unable to copy the Sales Hub note. Please select and copy the preview manually.';
+      }
+      renderViews();
+      focusSalesHubNoteModal();
+    });
+  });
+
+  document.querySelectorAll('.js-sales-hub-note-modal').forEach((modal) => {
+    modal.addEventListener('click', (event) => {
+      if (event.target === modal) {
+        closeSalesHubNotePreview();
+      }
+    });
+
+    modal.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSalesHubNotePreview();
+      }
     });
   });
 
