@@ -2982,6 +2982,89 @@ function getMeetingDisplayParticipants(meeting) {
   return 'No participants listed';
 }
 
+function getMeetingParticipantNames(meeting) {
+  return extractParticipantRecordsFromMeeting(meeting)
+    .map((participant) => normalizeCompanyName(participant.name))
+    .filter(Boolean);
+}
+
+function getMeetingParticipantsSummary(meeting, maxVisible = 3) {
+  const participantNames = getMeetingParticipantNames(meeting);
+  if (!participantNames.length) {
+    return 'No participants listed';
+  }
+
+  const visibleCount = Number.isFinite(Number(maxVisible))
+    ? Math.max(1, Math.trunc(Number(maxVisible)))
+    : 3;
+  const visibleNames = participantNames.slice(0, visibleCount);
+  const remainingCount = Math.max(0, participantNames.length - visibleNames.length);
+  const suffix = remainingCount > 0 ? ` +${remainingCount}` : '';
+
+  return `${visibleNames.join(', ')}${suffix}`;
+}
+
+function getMeetingCompactDurationLabel(meeting) {
+  if (typeof meeting.duration === 'string' && meeting.duration.trim()) {
+    return meeting.duration.trim();
+  }
+
+  if (typeof meeting.durationMinutes === 'number' && meeting.durationMinutes > 0) {
+    const totalMinutes = Math.max(0, Math.trunc(meeting.durationMinutes));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+
+    if (hours > 0 && minutes > 0) {
+      return `${hours}h ${minutes}m`;
+    }
+
+    if (hours > 0) {
+      return `${hours}h`;
+    }
+
+    return `${minutes}m`;
+  }
+
+  return '';
+}
+
+function getMeetingActionCounts(meeting) {
+  if (!meeting || typeof meeting !== 'object') {
+    return { openCount: 0, overdueCount: 0 };
+  }
+
+  const openActions = getCombinedActions().filter((action) => action.sourceMeetingId === meeting.id && !isActionClosed(action));
+  return {
+    openCount: openActions.length,
+    overdueCount: openActions.filter((action) => isActionOverdue(action)).length
+  };
+}
+
+function getMeetingOpenActionsLabel(openCount) {
+  return `${openCount} open action${openCount === 1 ? '' : 's'}`;
+}
+
+function getMeetingEntitySummaryLine(meeting) {
+  const customer = cleanupEntityDisplayName(getMeetingDisplayCustomer(meeting));
+  const partner = cleanupEntityDisplayName(getMeetingDisplayPartner(meeting));
+  const hasCustomer = customer && customer !== 'Unassigned';
+  const hasPartner = partner && partner !== 'Unassigned';
+
+  if (hasCustomer && hasPartner) {
+    return `${customer} · ${partner}`;
+  }
+
+  if (hasCustomer) {
+    return customer;
+  }
+
+  if (hasPartner) {
+    return partner;
+  }
+
+  return 'No customer or partner linked';
+}
+
 function getMeetingDurationLabel(meeting) {
   if (typeof meeting.duration === 'string' && meeting.duration.trim()) {
     return meeting.duration;
@@ -4292,6 +4375,9 @@ const sectionTitles = {
   import: 'Import Transcript'
 };
 
+const DEFAULT_TOPBAR_EYEBROW = 'Partner & Meeting Intelligence';
+const DASHBOARD_TOPBAR_SUBTITLE = 'Stay on top of partner activity, customer meetings, decisions, and next steps.';
+
 const mainPanelIds = ['dashboard-view', 'meetings-view', 'reviewQueue-view', 'customers-view', 'partners-view', 'participants-view', 'actions-view', 'dataManagement-view', 'import-view'];
 const viewerTabs = ['overview', 'summary', 'decisions', 'actions', 'questions', 'commercial', 'additionalSections', 'transcript'];
 
@@ -4620,7 +4706,7 @@ function renderViews() {
     })));
 
     renderGlobalSearchPanel();
-    document.getElementById('page-title').textContent = getPageTitle();
+    updateTopbarContent();
     attachInteractions();
     updateImportSaveButtonState();
     return;
@@ -4671,7 +4757,7 @@ function renderViews() {
   }
 
   renderGlobalSearchPanel();
-  document.getElementById('page-title').textContent = getPageTitle();
+  updateTopbarContent();
   attachInteractions();
   updateImportSaveButtonState();
 
@@ -7164,6 +7250,39 @@ function getActionStatusLabel(action) {
   return isActionOverdue(action) ? 'Overdue' : (action.status || 'Open');
 }
 
+function getActionUrgencyClassKey(action) {
+  if (isActionOverdue(action)) {
+    return 'overdue';
+  }
+
+  if (isActionDueToday(action)) {
+    return 'due-today';
+  }
+
+  if (isActionDueSoon(action)) {
+    return 'soon';
+  }
+
+  const status = String(action && action.status ? action.status : '').trim();
+  if (status === 'In Progress') {
+    return 'in-progress';
+  }
+
+  if (status === 'Waiting for Customer') {
+    return 'waiting-customer';
+  }
+
+  if (status === 'Waiting Internally') {
+    return 'waiting-internal';
+  }
+
+  if (status === 'Completed') {
+    return 'completed';
+  }
+
+  return '';
+}
+
 function getActiveActions(actions) {
   return (Array.isArray(actions) ? actions : []).filter((action) => !isActionClosed(action));
 }
@@ -8203,15 +8322,9 @@ function renderDashboardReviewIndicator(counts) {
   const dashboardReviewToneClass = hasPendingReviewItems
     ? 'dashboard-review-panel--pending'
     : 'dashboard-review-panel--clear';
-  const dashboardReviewPanelInlineStyle = hasPendingReviewItems
-    ? 'background:#ffe8e7;border-color:#efb6b5;'
-    : 'background:#e9f8ef;border-color:#caecd7;';
-  const dashboardReviewCardInlineStyle = hasPendingReviewItems
-    ? 'background:#fff4f3;border-color:#efb6b5;'
-    : 'background:#f2fcf6;border-color:#caecd7;';
 
   return `
-    <section class="panel-card dashboard-review-panel ${dashboardReviewToneClass}" style="${dashboardReviewPanelInlineStyle}">
+    <section class="panel-card dashboard-review-panel ${dashboardReviewToneClass}">
       <div class="section-heading dashboard-review-heading">
         <div>
           <h3>Review Queue</h3>
@@ -8219,11 +8332,11 @@ function renderDashboardReviewIndicator(counts) {
         </div>
       </div>
       <div class="dashboard-review-grid">
-        <button class="dashboard-review-card dashboard-review-card--needs-review js-open-review-queue-filter" type="button" data-review-queue-filter="Needs review" style="${dashboardReviewCardInlineStyle}">
+        <button class="dashboard-review-card dashboard-review-card--needs-review js-open-review-queue-filter" type="button" data-review-queue-filter="Needs review">
           <span class="dashboard-review-card-title">Needs review</span>
           <strong class="dashboard-review-card-count">${counts.needsReview}</strong>
         </button>
-        <button class="dashboard-review-card dashboard-review-card--needs-correction js-open-review-queue-filter" type="button" data-review-queue-filter="Needs correction" style="${dashboardReviewCardInlineStyle}">
+        <button class="dashboard-review-card dashboard-review-card--needs-correction js-open-review-queue-filter" type="button" data-review-queue-filter="Needs correction">
           <span class="dashboard-review-card-title">Needs correction</span>
           <strong class="dashboard-review-card-count">${counts.needsCorrection}</strong>
         </button>
@@ -8309,13 +8422,13 @@ function renderDashboard(meetings) {
   const hasRealData = totalMeetings > 0 || combinedActions.length > 0;
   const emptyState = hasRealData
     ? ''
-    : renderEmptyState('No meeting data yet', 'Import a transcript to start building your meeting knowledge base.', 'Go to Import Transcript');
+    : renderEmptyState('No meeting data yet', 'Import a transcript to start building your partner and meeting intelligence workspace.', 'Go to Import Transcript');
 
   return `
     <section class="hero-panel dashboard-banner">
       <div>
         <p class="eyebrow">Dashboard</p>
-        <h3>Meeting Knowledge Base</h3>
+        <h3>Partner &amp; Meeting Intelligence</h3>
         <p>Keep track of customer conversations, decisions, and follow-ups.</p>
       </div>
       <p class="dashboard-banner-summary">${openActions} open actions across ${totalMeetings} meetings</p>
@@ -8370,6 +8483,10 @@ function renderDashboard(meetings) {
 
 function renderMeetingsPage() {
   const meetings = getVisibleMeetings();
+  const totalMeetings = getAllMeetings().length;
+  const meetingCountLabel = meetings.length === totalMeetings
+    ? `${meetings.length} meetings`
+    : `${meetings.length} of ${totalMeetings} meetings`;
   const hasMeetingTypeFilter = state.meetingsMeetingTypeFilter !== MEETING_TYPE_FILTER_ALL_VALUE;
   const deletionWarning = state.meetingDeletionWarning
     ? `<p class="import-error" role="status">${escapeHtml(state.meetingDeletionWarning)}</p>`
@@ -8390,52 +8507,70 @@ function renderMeetingsPage() {
         <div>
           <p class="eyebrow">Meeting log</p>
           <h3>All meetings</h3>
+          <p class="meeting-meta">${escapeHtml(meetingCountLabel)}</p>
         </div>
-        <div class="sort-controls">
-          <label class="sort-label" for="meeting-type-filter">Meeting type</label>
-          <select id="meeting-type-filter" class="sort-select js-meeting-type-filter">
-            ${getMeetingTypeOptionsMarkup(state.meetingsMeetingTypeFilter, true)}
-          </select>
-          <label class="sort-label" for="meeting-sort-order">Sort</label>
-          <select id="meeting-sort-order" class="sort-select">
-            <option value="newest">Newest first</option>
-            <option value="oldest">Oldest first</option>
-          </select>
+      </div>
+      <div class="meetings-toolbar" role="group" aria-label="Meeting filters">
+        <div class="meetings-toolbar-controls">
+          <div class="meetings-toolbar-field">
+            <label class="sort-label" for="meeting-type-filter">Meeting type</label>
+            <select id="meeting-type-filter" class="sort-select js-meeting-type-filter">
+              ${getMeetingTypeOptionsMarkup(state.meetingsMeetingTypeFilter, true)}
+            </select>
+          </div>
+          <div class="meetings-toolbar-field">
+            <label class="sort-label" for="meeting-sort-order">Sort</label>
+            <select id="meeting-sort-order" class="sort-select">
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+            </select>
+          </div>
         </div>
       </div>
       ${deletionWarning}
-      <div class="meeting-list">${list}</div>
+      <div class="meeting-list meetings-overview-list">${list}</div>
     </section>
   `;
 }
 
 function renderMeetingListItem(meeting, options = {}) {
-  const customer = getMeetingDisplayCustomer(meeting);
-  const partner = getMeetingDisplayPartner(meeting);
-  const participantNames = getMeetingDisplayParticipants(meeting);
-  const openActions = getMeetingOpenActionCount(meeting);
+  const durationLabel = getMeetingCompactDurationLabel(meeting);
+  const topMeta = durationLabel ? `${formatDate(meeting.date)} · ${durationLabel}` : formatDate(meeting.date);
+  const entitySummary = getMeetingEntitySummaryLine(meeting);
+  const participantSummary = getMeetingParticipantsSummary(meeting);
+  const { openCount, overdueCount } = getMeetingActionCounts(meeting);
+  const openActionsLabel = getMeetingOpenActionsLabel(openCount);
+  const openActionsClassName = overdueCount > 0
+    ? 'meetings-overview-actions meetings-overview-actions--overdue'
+    : (openCount > 0 ? 'meetings-overview-actions meetings-overview-actions--active' : 'meetings-overview-actions meetings-overview-actions--none');
+  const participantLine = participantSummary === 'No participants listed'
+    ? participantSummary
+    : `Participants: ${participantSummary}`;
   const reviewStatusBadge = renderMeetingReviewStatusBadge(meeting.reviewStatus);
+  const meetingTitle = normalizeCompanyName(meeting.title || '') || 'Untitled meeting';
   const returnAttributes = options.returnSection && options.returnKey
     ? ` data-return-section="${escapeHtml(options.returnSection)}" data-return-key="${escapeHtml(options.returnKey)}"`
     : '';
 
   return `
-    <button class="meeting-card meeting-card--selectable js-open-meeting" type="button" data-meeting-id="${meeting.id}"${returnAttributes}>
-      <div class="meeting-card-header">
-        <div>
-          <p class="meeting-meta">${formatDate(meeting.date)} · ${getMeetingDurationLabel(meeting)}</p>
-          <h4>${escapeHtml(meeting.title || 'Untitled meeting')}</h4>
-        </div>
-        <div class="meeting-card-badges">
+    <button class="meeting-card meeting-card--selectable meetings-overview-card js-open-meeting" type="button" data-meeting-id="${escapeHtml(meeting.id)}" aria-label="Open meeting details for ${escapeHtml(meetingTitle)}"${returnAttributes}>
+      <div class="meetings-overview-top-row">
+        <p class="meeting-meta meetings-overview-date">${escapeHtml(topMeta)}</p>
+        <div class="meeting-card-badges meetings-overview-badges">
           ${reviewStatusBadge}
           ${renderMeetingTypeBadge(meeting.meetingType)}
         </div>
       </div>
-      <div class="meeting-table-details">
-        <div><strong>Customer</strong><span>${escapeHtml(customer)}</span></div>
-        <div><strong>Partner</strong><span>${escapeHtml(partner)}</span></div>
-        <div><strong>Participants</strong><span>${escapeHtml(participantNames)}</span></div>
-        <div><strong>Open actions</strong><span>${openActions}</span></div>
+      <div class="meetings-overview-main">
+        <h4>${escapeHtml(meetingTitle)}</h4>
+        <p class="meetings-overview-entity-line${entitySummary === 'No customer or partner linked' ? ' meetings-overview-entity-line--empty' : ''}">${escapeHtml(entitySummary)}</p>
+      </div>
+      <div class="meetings-overview-bottom-row">
+        <p class="meetings-overview-participants">${escapeHtml(participantLine)}</p>
+        <p class="${openActionsClassName}">
+          <span>${escapeHtml(openActionsLabel)}</span>
+          ${overdueCount > 0 ? `<span class="meetings-overview-overdue">· ${overdueCount} overdue</span>` : ''}
+        </p>
       </div>
     </button>
   `;
@@ -9370,11 +9505,10 @@ function renderCompactActionRow(action) {
   `).join('');
   const isExpanded = Boolean(state.actionsExpandedById[action.id]);
   const expandedId = `action-compact-details-${hashTextStable(action.id)}`;
-  const rowClass = isActionOverdue(action)
-    ? 'action-compact-row action-compact-row--overdue'
-    : isActionDueSoon(action)
-      ? 'action-compact-row action-compact-row--soon'
-      : 'action-compact-row';
+  const urgencyClassKey = getActionUrgencyClassKey(action);
+  const rowClass = urgencyClassKey
+    ? `action-compact-row action-compact-row--${urgencyClassKey}`
+    : 'action-compact-row';
   const ownershipCategory = getActionDisplayedResponsibility(action);
   const expandCue = isExpanded ? 'Hide details' : 'Click to view details';
   const openSourceMeetingButton = action.sourceMeetingId
@@ -10513,6 +10647,8 @@ function renderActionCard(action, options = {}) {
   const dueDateLabel = action.dueDate ? formatDate(action.dueDate) : 'No due date';
   const dueDateClass = isActionOverdue(action) ? 'action-due-date action-due-date--overdue' : 'action-due-date';
   const highlightedClass = state.searchHighlightedActionId === action.id ? ' action-card--highlighted' : '';
+  const urgencyClassKey = getActionUrgencyClassKey(action);
+  const urgencyClass = urgencyClassKey ? ` action-card--urgency-${urgencyClassKey}` : '';
   const statusClass = getActionStatusClass(action);
   const statusLabel = getActionStatusLabel(action);
   const statusOptions = ACTION_STATUSES.map((status) => `
@@ -10520,7 +10656,7 @@ function renderActionCard(action, options = {}) {
   `).join('');
 
   return `
-    <article class="action-card action-card--ownership-${escapeHtml(ownershipCategory)}${highlightedClass}" data-action-id="${escapeHtml(action.id)}">
+    <article class="action-card action-card--ownership-${escapeHtml(ownershipCategory)}${urgencyClass}${highlightedClass}" data-action-id="${escapeHtml(action.id)}">
       <div class="action-card-heading-row">
         ${renderActionOwnershipBadge(action)}
         <h4>${escapeHtml(action.description)}</h4>
@@ -12171,6 +12307,33 @@ function getPageTitle() {
   }
 
   return sectionTitles[state.activeSection] || 'Dashboard';
+}
+
+function getPageSubtitle() {
+  if (state.activeSection !== 'dashboard') {
+    return '';
+  }
+
+  return DASHBOARD_TOPBAR_SUBTITLE;
+}
+
+function updateTopbarContent() {
+  const titleElement = document.getElementById('page-title');
+  if (titleElement) {
+    titleElement.textContent = getPageTitle();
+  }
+
+  const eyebrowElement = document.getElementById('page-eyebrow');
+  if (eyebrowElement) {
+    eyebrowElement.textContent = DEFAULT_TOPBAR_EYEBROW;
+  }
+
+  const subtitleElement = document.getElementById('page-subtitle');
+  if (subtitleElement) {
+    const subtitleText = getPageSubtitle();
+    subtitleElement.textContent = subtitleText;
+    subtitleElement.hidden = !subtitleText;
+  }
 }
 
 function formatDate(dateString) {
