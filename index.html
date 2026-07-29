@@ -48,15 +48,32 @@
       </div>
 
       <nav class="navigation">
-        <button class="nav-button active" type="button" data-section="dashboard">Dashboard</button>
-        <button class="nav-button" type="button" data-section="meetings">Meetings</button>
-        <button class="nav-button" type="button" data-section="reviewQueue">Review Queue</button>
-        <button class="nav-button" type="button" data-section="customers">Customers</button>
-        <button class="nav-button" type="button" data-section="partners">Partners</button>
-        <button class="nav-button" type="button" data-section="participants">Participants</button>
-        <button class="nav-button" type="button" data-section="actions">Actions</button>
-        <button class="nav-button" type="button" data-section="dataManagement">Data Management</button>
-        <button class="nav-button" type="button" data-section="import">Import Transcript</button>
+        <div class="nav-group" aria-label="Workspace">
+          <p class="nav-group-label">Workspace</p>
+          <div class="nav-group-items">
+            <button class="nav-button active" type="button" data-section="dashboard">Dashboard</button>
+            <button class="nav-button" type="button" data-section="meetings">Meetings</button>
+            <button class="nav-button" type="button" data-section="actions">Actions</button>
+            <button class="nav-button" type="button" data-section="reviewQueue">Review Queue</button>
+            <button class="nav-button nav-button--import" type="button" data-section="import">Import Transcript</button>
+          </div>
+        </div>
+
+        <div class="nav-group" aria-label="Directory">
+          <p class="nav-group-label">Directory</p>
+          <div class="nav-group-items">
+            <button class="nav-button" type="button" data-section="customers">Customers</button>
+            <button class="nav-button" type="button" data-section="partners">Partners</button>
+            <button class="nav-button" type="button" data-section="participants">Participants</button>
+          </div>
+        </div>
+
+        <div class="nav-group" aria-label="Administration">
+          <p class="nav-group-label">Administration</p>
+          <div class="nav-group-items">
+            <button class="nav-button" type="button" data-section="dataManagement">Data Management</button>
+          </div>
+        </div>
       </nav>
 
       <div class="sidebar-footer">
@@ -74,9 +91,10 @@
 
     <main class="main-content">
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Meeting knowledge base</p>
+        <div class="topbar-intro">
+          <p class="eyebrow" id="page-eyebrow">Partner &amp; Meeting Intelligence</p>
           <h2 id="page-title">Dashboard</h2>
+          <p id="page-subtitle" class="page-subtitle">Stay on top of partner activity, customer meetings, decisions, and next steps.</p>
         </div>
 
         <div class="topbar-actions">
