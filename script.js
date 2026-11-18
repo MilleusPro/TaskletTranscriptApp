@@ -119,6 +119,8 @@ const MODERN_MEETING_COLUMN_NAMES = [
   'extra_sections'
 ];
 
+const CLOUD_REQUEST_TIMEOUT_MS = 12000;
+
 let supabaseClient = null;
 let authSubscription = null;
 let appInitialized = false;
@@ -290,6 +292,33 @@ function canExposeParserDebug() {
   return isCurrentUserAdmin();
 }
 
+async function awaitCloudRequestWithTimeout(requestPromise, operationLabel, timeoutMs = CLOUD_REQUEST_TIMEOUT_MS) {
+  let timeoutId = null;
+  const timeoutResult = new Promise((resolve) => {
+    timeoutId = setTimeout(() => {
+      resolve({
+        data: null,
+        error: { message: `${operationLabel} timed out because the cloud service did not respond.` },
+        timedOut: true
+      });
+    }, timeoutMs);
+  });
+
+  const guardedRequest = Promise.resolve(requestPromise).catch((error) => ({
+    data: null,
+    error: { message: error && error.message ? error.message : `${operationLabel} failed unexpectedly.` },
+    timedOut: false
+  }));
+
+  try {
+    return await Promise.race([guardedRequest, timeoutResult]);
+  } finally {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  }
+}
+
 async function loadAuthenticatedProfile(user) {
   const fallbackProfile = createDefaultProfileFromUser(user);
   if (!supabaseClient || !user || !user.id) {
@@ -299,11 +328,14 @@ async function loadAuthenticatedProfile(user) {
     };
   }
 
-  const { data, error } = await supabaseClient
-    .from('profiles')
-    .select('id, email, role')
-    .eq('id', user.id)
-    .maybeSingle();
+  const { data, error } = await awaitCloudRequestWithTimeout(
+    supabaseClient
+      .from('profiles')
+      .select('id, email, role')
+      .eq('id', user.id)
+      .maybeSingle(),
+    'Profile loading'
+  );
 
   if (error) {
     return {
@@ -700,11 +732,14 @@ async function loadAuthenticatedSettings() {
   authState.settingsLoaded = false;
   state.cloudSettingsError = '';
 
-  const { data, error } = await supabaseClient
-    .from('user_settings')
-    .select(USER_SETTINGS_ROW_COLUMNS)
-    .eq('user_id', authState.user.id)
-    .maybeSingle();
+  const { data, error } = await awaitCloudRequestWithTimeout(
+    supabaseClient
+      .from('user_settings')
+      .select(USER_SETTINGS_ROW_COLUMNS)
+      .eq('user_id', authState.user.id)
+      .maybeSingle(),
+    'Settings loading'
+  );
 
   if (loadToken !== cloudSettingsLoadToken) {
     return { success: false, error: 'Settings loading was superseded by a newer session state.' };
@@ -752,14 +787,29 @@ async function loadAuthenticatedMeetings() {
   const profiles = getUniqueMeetingQueryProfiles();
 
   for (const profile of profiles) {
-    ({ data, error } = await fetchMeetingsWithProfile(profile, authState.user.id));
+    ({ data, error } = await awaitCloudRequestWithTimeout(
+      fetchMeetingsWithProfile(profile, authState.user.id),
+      'Meeting loading'
+    ));
     if (!error) {
+      break;
+    }
+
+    // A timeout means the cloud service is unreachable, so retrying other
+    // column layouts would only stall the screen further.
+    if (error.timedOut) {
       break;
     }
 
     const handledAsMissingColumn = registerUnsupportedMeetingColumnFromError(error);
     if (handledAsMissingColumn) {
       continue;
+    }
+
+    // Transport failures carry no PostgREST error code; retrying other column
+    // layouts cannot succeed and must not mark columns as unsupported.
+    if (!error.code) {
+      break;
     }
 
     MODERN_MEETING_COLUMN_NAMES.forEach((columnName) => {
@@ -812,10 +862,13 @@ async function loadAuthenticatedActionOverrides() {
   state.actionOverridesError = '';
   authState.actionOverridesLoaded = false;
 
-  const { data, error } = await supabaseClient
-    .from('action_overrides')
-    .select(ACTION_OVERRIDE_ROW_COLUMNS)
-    .eq('user_id', authState.user.id);
+  const { data, error } = await awaitCloudRequestWithTimeout(
+    supabaseClient
+      .from('action_overrides')
+      .select(ACTION_OVERRIDE_ROW_COLUMNS)
+      .eq('user_id', authState.user.id),
+    'Action update loading'
+  );
 
   if (loadToken !== cloudActionOverridesLoadToken) {
     return { success: false, error: 'Action override loading was superseded by a newer session state.' };
@@ -996,10 +1049,13 @@ async function handleLoginSubmit(event) {
   authState.status = 'Signing in...';
   updateAuthView();
 
-  const { error } = await supabaseClient.auth.signInWithPassword({
-    email: emailValue,
-    password: passwordValue
-  });
+  const { error } = await awaitCloudRequestWithTimeout(
+    supabaseClient.auth.signInWithPassword({
+      email: emailValue,
+      password: passwordValue
+    }),
+    'Sign in'
+  );
 
   if (error) {
     authState.signingIn = false;
@@ -1049,7 +1105,11 @@ function subscribeToAuthChanges() {
     const nextUser = session && session.user ? session.user : null;
     authState.error = '';
     authState.status = '';
-    setAppAuthenticated(nextUser);
+    // Defer out of the Supabase callback: awaiting Supabase requests inside
+    // onAuthStateChange can deadlock on the client's internal auth lock.
+    setTimeout(() => {
+      setAppAuthenticated(nextUser);
+    }, 0);
   });
 
   authSubscription = subscriptionResult && subscriptionResult.data ? subscriptionResult.data.subscription : null;
@@ -1074,7 +1134,10 @@ async function bootstrapAuthentication() {
   authState.status = 'Checking session...';
   updateAuthView();
 
-  const { data, error: getUserError } = await supabaseClient.auth.getUser();
+  const { data, error: getUserError } = await awaitCloudRequestWithTimeout(
+    supabaseClient.auth.getUser(),
+    'Session verification'
+  );
   if (getUserError && !isSessionMissingError(getUserError)) {
     authState.error = 'Unable to verify the current session. Please sign in.';
     authState.status = '';
